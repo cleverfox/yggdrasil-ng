@@ -95,7 +95,7 @@ fn default_multicast_regex() -> String {
 
 /// Platform-specific default multicast interface patterns (matches yggdrasil-go).
 fn default_multicast_interfaces() -> Vec<MulticastInterfaceConfig> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
     {
         vec![MulticastInterfaceConfig {
             regex: ".*".to_string(),
@@ -129,7 +129,7 @@ fn default_multicast_interfaces() -> Vec<MulticastInterfaceConfig> {
         ]
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "openbsd")))]
     {
         Vec::new()
     }
