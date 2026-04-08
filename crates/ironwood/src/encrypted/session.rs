@@ -539,20 +539,25 @@ impl ConcurrentSessionManager {
     /// Handle incoming traffic (hot path).
     /// Read-locks the map, clones the session Arc, drops the map lock,
     /// then locks only the per-session mutex for decryption.
-    fn handle_traffic(
-        &self,
-        from: &PublicKey,
-        data: &[u8],
-        our_ed_priv: &ed25519_dalek::SigningKey,
-    ) -> Vec<OutAction> {
+    fn handle_traffic(&self,from: &PublicKey, data: &[u8], our_ed_priv: &ed25519_dalek::SigningKey) -> Vec<OutAction> {
         let session_arc = {
             let map = self.sessions.read().unwrap();
             map.get(from).cloned()
         };
 
         let Some(session_arc) = session_arc else {
-            tracing::debug!("encrypted: dropping traffic from unknown sender {:?}", hex::encode(&from[..4]));
-            return Vec::new();
+            // No session for this sender — they're using a stale session (e.g. after we restarted).
+            // Just send an Init with throwaway keys we won't save.
+            // If they Ack, we'll set up a real session and let it self-heal.
+            // Don't create a buffer or session here — the sender could be spoofed/replayed.
+            tracing::debug!("encrypted: no session for {:?}, sending throwaway Init", hex::encode(&from[..4]));
+            let (current_pub, _) = new_box_keys();
+            let (next_pub, _) = new_box_keys();
+            let init = SessionInit::new(&current_pub, &next_pub, 0);
+            return match init.encrypt(our_ed_priv, from, SESSION_TYPE_INIT) {
+                Ok(data) => vec![OutAction::SendToInner { dest: *from, data }],
+                Err(_) => Vec::new(),
+            };
         };
 
         let mut info = session_arc.lock().unwrap();
@@ -676,12 +681,12 @@ impl ConcurrentSessionManager {
     }
 
     /// Handle incoming ack message (cold path).
-    fn handle_ack(
-        &self,
-        from: &PublicKey,
-        ack: &SessionInit,
-        _our_ed_priv: &ed25519_dalek::SigningKey,
-    ) -> Vec<OutAction> {
+    ///
+    /// If a session already exists, treat as a normal ack (just update keys).
+    /// If no session exists, treat the ack as an init — create
+    /// the session, update keys, and **send an ack back** so the remote side
+    /// can align its keys with ours.
+    fn handle_ack(&self,from: &PublicKey, ack: &SessionInit, our_ed_priv: &ed25519_dalek::SigningKey) -> Vec<OutAction> {
         let mut actions = Vec::new();
 
         // Try read-lock first: existing session?
@@ -691,6 +696,7 @@ impl ConcurrentSessionManager {
         };
 
         if let Some(session_arc) = existing {
+            // Existing session: pure ack — just update keys, no reply needed.
             let mut info = session_arc.lock().unwrap();
             if ack.seq > info.seq {
                 info.handle_update(ack);
@@ -707,10 +713,23 @@ impl ConcurrentSessionManager {
                     info.handle_update(ack);
                 }
             } else {
+                // Go: when an ack creates a NEW session, treat it as an init
+                // (call handleInit instead of handleAck) — this sends an ack
+                // back so the remote can align its keys with ours.
                 let (buffered_data, mut info) = self.create_session_from_init(from, ack);
 
                 if ack.seq > info.seq {
                     info.handle_update(ack);
+                }
+
+                // Send ack back (matches Go: handleInit sends ack)
+                let ack_init = SessionInit::new(
+                    &info.send_pub,
+                    &info.next_pub,
+                    info.local_key_seq,
+                );
+                if let Ok(data) = ack_init.encrypt(our_ed_priv, from, SESSION_TYPE_ACK) {
+                    actions.push(OutAction::SendToInner { dest: *from, data });
                 }
 
                 // Send buffered data
