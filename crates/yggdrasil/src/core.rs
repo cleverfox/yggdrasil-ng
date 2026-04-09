@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
 use ironwood::{Addr, Config as IwConfig, EncryptedPacketConn, PacketConn};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 
 use crate::address::{addr_for_key, subnet_for_key, Address, Subnet};
 use crate::config::Config;
 use crate::ipv6rwc::ReadWriteCloser;
 use crate::links::{ActiveLinks, Links, LinkPeerInfo};
-use crate::multicast::Multicast;
+use crate::multicast::{Multicast, NetworkInterface};
 use crate::proto::ProtoHandler;
 use crate::tls_support;
 
@@ -40,6 +40,8 @@ pub struct Core {
     pub(crate) tls_cert_expiry: Arc<RwLock<time::OffsetDateTime>>,
     proto_tx: mpsc::Sender<(Addr, Vec<u8>)>,
     pub(crate) multicast: Mutex<Option<Arc<Multicast>>>,
+    external_ifaces_tx: watch::Sender<Vec<NetworkInterface>>,
+    external_ifaces_rx: watch::Receiver<Vec<NetworkInterface>>,
 }
 
 impl Core {
@@ -92,6 +94,9 @@ impl Core {
         let tls_client_config = Arc::new(RwLock::new(tls_client_config));
         let tls_cert_expiry = Arc::new(RwLock::new(cert_expiry));
 
+        // Create external interface watch channel (for Android multicast support)
+        let (external_ifaces_tx, external_ifaces_rx) = watch::channel(Vec::new());
+
         // Create protocol message channel
         let (proto_tx, mut proto_rx) = mpsc::channel::<(Addr, Vec<u8>)>(64);
         let proto_handler = ProtoHandler::new(proto_tx.clone());
@@ -125,6 +130,8 @@ impl Core {
             tls_cert_expiry,
             proto_tx,
             multicast: Mutex::new(None),
+            external_ifaces_tx,
+            external_ifaces_rx,
         });
 
         // Spawn TLS certificate renewal task
@@ -415,6 +422,46 @@ impl Core {
     pub async fn set_multicast(&self, m: Arc<Multicast>) {
         let mut slot = self.multicast.lock().await;
         *slot = Some(m);
+    }
+
+    /// Start multicast peer discovery using the current config.
+    ///
+    /// If external interfaces have been provided via `update_network_interfaces()`,
+    /// they will be used instead of `getifaddrs()` (needed on Android).
+    pub async fn start_multicast(self: &Arc<Self>) -> Result<(), String> {
+        let config = self.config.multicast_interfaces.clone();
+        if config.is_empty() {
+            return Err("no multicast interfaces configured".to_string());
+        }
+
+        // If external interfaces have been set, pass the receiver to Multicast
+        let external_rx = if !self.external_ifaces_rx.borrow().is_empty() {
+            Some(self.external_ifaces_rx.clone())
+        } else {
+            None
+        };
+
+        let m = Multicast::new(self.clone(), config, external_rx).await?;
+        let m = Arc::new(m);
+        tracing::info!("Multicast peer discovery started");
+        self.set_multicast(m).await;
+        Ok(())
+    }
+
+    /// Provide network interface info from an external source (e.g. Android ConnectivityManager).
+    ///
+    /// When set, multicast discovery uses these interfaces instead of `getifaddrs()`.
+    /// Call with an empty vec to clear external interfaces.
+    pub fn update_network_interfaces(&self, ifaces: Vec<NetworkInterface>) {
+        let _ = self.external_ifaces_tx.send(ifaces);
+    }
+
+    /// Stop multicast peer discovery (if running).
+    pub async fn close_multicast(&self) {
+        let slot = self.multicast.lock().await;
+        if let Some(m) = slot.as_ref() {
+            m.close();
+        }
     }
 
     /// Get multicast interface info for admin API.

@@ -9,7 +9,7 @@ use yggdrasil::admin::AdminSocket;
 use yggdrasil::config::Config;
 use yggdrasil::core::Core;
 use yggdrasil::ipv6rwc::ReadWriteCloser;
-use yggdrasil::multicast::Multicast;
+
 use yggdrasil::tun::TunAdapter;
 
 #[cfg(windows)]
@@ -285,22 +285,9 @@ async fn run_node(
     };
 
     // Start multicast peer discovery
-    let multicast = if !config.multicast_interfaces.is_empty() {
-        match Multicast::new(core.clone(), config.multicast_interfaces.clone()).await {
-            Ok(m) => {
-                tracing::info!("Multicast peer discovery started");
-                let m = std::sync::Arc::new(m);
-                core.set_multicast(m.clone()).await;
-                Some(m)
-            }
-            Err(e) => {
-                tracing::warn!("Multicast peer discovery disabled: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    if let Err(e) = core.start_multicast().await {
+        tracing::warn!("Multicast peer discovery disabled: {}", e);
+    }
 
     // Wait for shutdown signal
     tracing::info!("Yggdrasil NG started");
@@ -308,9 +295,7 @@ async fn run_node(
     tracing::info!("Shutting down...");
 
     // Cleanup
-    if let Some(m) = &multicast {
-        m.close();
-    }
+    core.close_multicast().await;
     if let Some(admin) = &admin {
         admin.close();
     }

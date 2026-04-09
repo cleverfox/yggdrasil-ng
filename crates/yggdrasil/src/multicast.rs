@@ -8,7 +8,7 @@ use getifaddrs::{self, InterfaceFlags};
 use regex::Regex;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +21,17 @@ const MULTICAST_GROUP: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x0114
 const MULTICAST_PORT: u16 = 9001;
 const BEACON_MAX_INTERVAL: Duration = Duration::from_secs(15);
 const RECV_BUF_SIZE: usize = 2048;
+
+// ── External interface info ──────────────────────────────────────────────
+
+/// Network interface info provided externally (e.g. from Android ConnectivityManager).
+/// On platforms where `getifaddrs()` is restricted, the app can supply this data instead.
+#[derive(Clone, Debug)]
+pub struct NetworkInterface {
+    pub name: String,
+    pub index: u32,
+    pub addrs: Vec<Ipv6Addr>,
+}
 
 // ── Advertisement wire format ────────────────────────────────────────────
 
@@ -129,9 +140,14 @@ pub struct Multicast {
 
 impl Multicast {
     /// Create and start the multicast discovery engine.
+    ///
+    /// If `external_rx` is `Some`, interface info is taken from the watch channel
+    /// instead of enumerating system interfaces via `getifaddrs()`. This is needed
+    /// on Android API 30+ where interface enumeration is restricted.
     pub async fn new(
         core: Arc<Core>,
         config: Vec<MulticastInterfaceConfig>,
+        external_rx: Option<watch::Receiver<Vec<NetworkInterface>>>,
     ) -> Result<Self, String> {
         // Check if any interface has beacon or listen enabled
         let any_enabled = config.iter().any(|c| c.beacon || c.listen);
@@ -172,7 +188,7 @@ impl Multicast {
             let udp = udp.clone();
             let patterns = patterns.clone();
             tokio::spawn(async move {
-                monitor_and_announce_loop(cancel, core, interfaces, listeners, udp, patterns).await;
+                monitor_and_announce_loop(cancel, core, interfaces, listeners, udp, patterns, external_rx).await;
             })
         };
 
@@ -346,6 +362,53 @@ fn discover_interfaces(core: &Core, patterns: &[(Regex, MulticastInterfaceConfig
     result
 }
 
+/// Build interface map from externally provided interface info (e.g. Android ConnectivityManager).
+/// Applies the same regex pattern matching as `discover_interfaces`.
+fn discover_from_external(
+    core: &Core,
+    patterns: &[(Regex, MulticastInterfaceConfig)],
+    external: &[NetworkInterface],
+) -> HashMap<String, InterfaceState> {
+    let mut result = HashMap::new();
+    let pk = core.public_key();
+
+    for iface in external {
+        if iface.addrs.is_empty() {
+            continue;
+        }
+
+        // Match against configured patterns (first match wins)
+        for (re, cfg) in patterns {
+            if !cfg.beacon && !cfg.listen {
+                continue;
+            }
+            if !re.is_match(&iface.name) {
+                continue;
+            }
+
+            let password = cfg.password.as_bytes().to_vec();
+            let hash = compute_auth_hash(pk, &password);
+
+            result.insert(iface.name.clone(), InterfaceState {
+                index: iface.index,
+                addrs: iface.addrs.clone(),
+                beacon: cfg.beacon,
+                listen: cfg.listen,
+                port: cfg.port,
+                priority: cfg.priority,
+                password,
+                hash,
+                beacon_interval: Duration::from_secs(1),
+                last_beacon: Instant::now() - Duration::from_secs(60),
+            });
+
+            break; // first match wins
+        }
+    }
+
+    result
+}
+
 // ── Monitor + announce loop ──────────────────────────────────────────────
 
 async fn monitor_and_announce_loop(
@@ -355,12 +418,17 @@ async fn monitor_and_announce_loop(
     listeners: Arc<Mutex<HashMap<String, ListenerInfo>>>,
     udp: Arc<UdpSocket>,
     patterns: Vec<(Regex, MulticastInterfaceConfig)>,
+    external_rx: Option<watch::Receiver<Vec<NetworkInterface>>>,
 ) {
     let dest = SocketAddrV6::new(MULTICAST_GROUP, MULTICAST_PORT, 0, 0);
 
     loop {
-        // Update interfaces
-        let new_ifaces = discover_interfaces(&core, &patterns);
+        // Update interfaces: use external source if provided, otherwise enumerate via getifaddrs
+        let new_ifaces = if let Some(rx) = &external_rx {
+            discover_from_external(&core, &patterns, &rx.borrow())
+        } else {
+            discover_interfaces(&core, &patterns)
+        };
 
         // Update shared state, preserving beacon timing for existing interfaces
         {
