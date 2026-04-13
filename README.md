@@ -393,6 +393,50 @@ ipv4_address = "192.168.2.1/24"
 
 Hosts on each side can then reach the other network through their Yggdrasil gateway node.
 
+### Private VPN (Multi-Node)
+
+CKR can create a virtual private network where multiple nodes share a common IPv4 subnet and communicate directly over private IPs.
+Each node gets an address from the shared range (e.g., `10.99.0.0/24`) and has CKR routes pointing to every other node.
+
+**Node A** (`10.99.0.1`):
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "10.99.0.1/24"
+
+[tunnel_routing.remote_subnets]
+"<NODE_B_KEY>" = ["10.99.0.2/32"]
+"<NODE_C_KEY>" = ["10.99.0.3/32"]
+```
+
+**Node B** (`10.99.0.2`):
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "10.99.0.2/24"
+
+[tunnel_routing.remote_subnets]
+"<NODE_A_KEY>" = ["10.99.0.1/32"]
+"<NODE_C_KEY>" = ["10.99.0.3/32"]
+```
+
+**Node C** (`10.99.0.3`):
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "10.99.0.3/24"
+
+[tunnel_routing.remote_subnets]
+"<NODE_A_KEY>" = ["10.99.0.1/32"]
+"<NODE_B_KEY>" = ["10.99.0.2/32"]
+```
+
+Any IPv4 service works transparently between nodes — SSH, HTTP, SMB, databases, etc.
+The nodes don't need to be directly peered; traffic routes through the Yggdrasil mesh automatically.
+
+Note that each node needs routes to every other node, so the config grows with the number of participants.
+For large deployments, consider a script to generate configs.
+
 ## Running as a Windows Service
 
 On Windows, Yggdrasil-ng can run as a system service managed by the Service Control Manager (SCM).
