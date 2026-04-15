@@ -4,6 +4,12 @@ namespace yggdrasil_mobile {
 
     /// Get the library version string.
     string get_version();
+
+    /// Expand the CKR tunnel_routing config into the minimal set of CIDRs
+    /// that the core will actually route (includes minus excludes).
+    /// Returns the same prefix list the core logs as "Active CKR routes".
+    /// Used by Android to feed VpnService.Builder.addRoute().
+    sequence<string> expand_ckr_cidrs(TunnelRoutingConfig config);
 };
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -39,6 +45,27 @@ dictionary YggdrasilConfig {
     sequence<MulticastInterfaceConfig>  multicast_interfaces;
     /// Device name for NodeInfo.
     string                              node_info_name;
+    /// Crypto-key tunnel routing (CKR) configuration.
+    TunnelRoutingConfig                 tunnel_routing;
+};
+
+/// One CKR routing entry: a destination public key and the CIDRs to send to it.
+dictionary CkrRemoteSubnet {
+    /// Hex-encoded ed25519 public key (64 hex chars = 32 bytes).
+    string           public_key;
+    /// CIDR prefixes routed to this key, e.g. "10.0.0.0/24" or "2001:db8::/32".
+    sequence<string> cidrs;
+};
+
+/// CKR (Crypto-Key Routing) configuration.
+dictionary TunnelRoutingConfig {
+    /// Master switch for CKR.
+    boolean                     enable;
+    /// Optional IPv4 address in CIDR notation to assign to the tunnel.
+    /// Empty string disables IPv4 tunneling.
+    string                      ipv4_address;
+    /// Remote subnets to route through Yggdrasil peers.
+    sequence<CkrRemoteSubnet>   remote_subnets;
 };
 
 // ── State types ─────────────────────────────────────────────────────────────

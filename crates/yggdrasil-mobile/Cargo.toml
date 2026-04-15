@@ -11,7 +11,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-yggdrasil = { path = "../yggdrasil", default-features = false }
+yggdrasil = { path = "../yggdrasil", default-features = false, features = ["ckr"] }
 ironwood = { path = "../ironwood" }
 tokio = { version = "1", features = ["full"] }
 uniffi = { version = "0.31.0", features = ["build", "cli"] }

@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 
 use ipnet::IpNet;
+#[cfg(not(target_os = "android"))]
 use route_manager::RouteManager;
 
 use crate::address::{is_valid_address, is_valid_subnet};
@@ -35,21 +36,17 @@ impl CryptoKey {
 
         for (pubkey_hex, cidrs) in &config.remote_subnets {
             let dest = parse_pubkey(pubkey_hex)?;
-            for cidr in cidrs {
-                let prefix: IpNet = cidr
-                    .parse()
-                    .map_err(|e| format!("invalid CIDR '{}': {}", cidr, e))?;
-
+            for prefix in expand_cidrs(cidrs)? {
                 match prefix {
                     IpNet::V6(_) => {
                         if is_yggdrasil_destination(prefix.addr()) {
                             return Err(format!(
                                 "can't specify Yggdrasil destination as routed subnet: {}",
-                                cidr
+                                prefix
                             ));
                         }
                         if v6_routes.iter().any(|r| r.prefix == prefix) {
-                            return Err(format!("duplicate remote subnet: {}", cidr));
+                            return Err(format!("duplicate remote subnet: {}", prefix));
                         }
                         v6_routes.push(Route {
                             prefix,
@@ -58,7 +55,7 @@ impl CryptoKey {
                     }
                     IpNet::V4(_) => {
                         if v4_routes.iter().any(|r| r.prefix == prefix) {
-                            return Err(format!("duplicate remote subnet: {}", cidr));
+                            return Err(format!("duplicate remote subnet: {}", prefix));
                         }
                         v4_routes.push(Route {
                             prefix,
@@ -138,6 +135,97 @@ pub fn is_yggdrasil_destination(ip: IpAddr) -> bool {
     }
 }
 
+/// Parse a list of CIDR entries, where entries prefixed with `!` are
+/// treated as exclusions. Returns the minimal set of prefixes covering
+/// `(union of includes) \ (union of excludes)`.
+///
+/// Excludes only apply within the same address family as the includes.
+/// Duplicate includes are tolerated; excludes outside any include are ignored.
+pub fn expand_cidrs(entries: &[String]) -> Result<Vec<IpNet>, String> {
+    let mut v4_inc: Vec<IpNet> = Vec::new();
+    let mut v6_inc: Vec<IpNet> = Vec::new();
+    let mut v4_exc: Vec<IpNet> = Vec::new();
+    let mut v6_exc: Vec<IpNet> = Vec::new();
+
+    for raw in entries {
+        let (is_exclude, cidr_str) = match raw.strip_prefix('!') {
+            Some(rest) => (true, rest.trim()),
+            None => (false, raw.as_str()),
+        };
+        let prefix: IpNet = cidr_str
+            .parse()
+            .map_err(|e| format!("invalid CIDR '{}': {}", cidr_str, e))?;
+        // Normalize to the network address (e.g. 10.0.0.5/24 -> 10.0.0.0/24).
+        let prefix = prefix.trunc();
+        match (is_exclude, prefix) {
+            (false, IpNet::V4(_)) => v4_inc.push(prefix),
+            (false, IpNet::V6(_)) => v6_inc.push(prefix),
+            (true, IpNet::V4(_)) => v4_exc.push(prefix),
+            (true, IpNet::V6(_)) => v6_exc.push(prefix),
+        }
+    }
+
+    let mut out = Vec::new();
+    for inc in v4_inc {
+        out.extend(subtract_many(inc, &v4_exc));
+    }
+    for inc in v6_inc {
+        out.extend(subtract_many(inc, &v6_exc));
+    }
+    Ok(out)
+}
+
+/// Subtract a set of exclude prefixes from a single include prefix.
+/// All prefixes must share an address family.
+fn subtract_many(include: IpNet, excludes: &[IpNet]) -> Vec<IpNet> {
+    let mut pieces = vec![include];
+    for ex in excludes {
+        let mut next = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            if ex.contains(&p) {
+                // Piece fully covered by exclude → drop.
+            } else if p.contains(ex) {
+                next.extend(subtract_one(p, *ex));
+            } else {
+                // Disjoint (prefix-aligned ranges can't partially overlap).
+                next.push(p);
+            }
+        }
+        pieces = next;
+    }
+    pieces
+}
+
+/// Subtract `b` from `a`, requiring `a.contains(&b)` and `a != b`.
+/// Produces `log2(|a|/|b|)` disjoint covering prefixes.
+fn subtract_one(a: IpNet, b: IpNet) -> Vec<IpNet> {
+    let mut result = Vec::new();
+    let mut current = a;
+    while current != b {
+        let new_len = current.prefix_len() + 1;
+        let mut halves = match current.subnets(new_len) {
+            Ok(it) => it,
+            Err(_) => return result,
+        };
+        let left = match halves.next() {
+            Some(x) => x,
+            None => return result,
+        };
+        let right = match halves.next() {
+            Some(x) => x,
+            None => return result,
+        };
+        if left.contains(&b) {
+            result.push(right);
+            current = left;
+        } else {
+            result.push(left);
+            current = right;
+        }
+    }
+    result
+}
+
 fn parse_pubkey(hex_str: &str) -> Result<[u8; 32], String> {
     let bytes =
         hex::decode(hex_str).map_err(|e| format!("invalid public key hex '{}': {}", hex_str, e))?;
@@ -155,19 +243,22 @@ fn parse_pubkey(hex_str: &str) -> Result<[u8; 32], String> {
 
 /// Install system routes for all configured CKR subnets, pointing them
 /// at the TUN interface so the OS sends that traffic into the tunnel.
-/// Works on Linux, Windows, and macOS.
+/// Works on Linux, Windows, and macOS. No-op on Android (VpnService handles routes).
+#[cfg(target_os = "android")]
+pub fn install_routes(_config: &TunnelRoutingConfig, _tun_name: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn install_routes(config: &TunnelRoutingConfig, tun_name: &str) -> Result<(), String> {
-    if !config.enable {
+    if !config.enable || !config.install_system_routes {
         return Ok(());
     }
 
-    // Collect all unique CIDRs from the config
+    // Collect all unique CIDRs from the config (expanded, excludes applied).
     let mut cidrs: Vec<IpNet> = Vec::new();
     for subnet_list in config.remote_subnets.values() {
-        for cidr_str in subnet_list {
-            let prefix: IpNet = cidr_str
-                .parse()
-                .map_err(|e| format!("invalid CIDR '{}': {}", cidr_str, e))?;
+        for prefix in expand_cidrs(subnet_list)? {
             if !cidrs.contains(&prefix) {
                 cidrs.push(prefix);
             }
@@ -199,15 +290,19 @@ pub fn install_routes(config: &TunnelRoutingConfig, tun_name: &str) -> Result<()
 }
 
 /// Remove previously installed CKR routes from the system routing table.
+#[cfg(target_os = "android")]
+pub fn remove_routes(_config: &TunnelRoutingConfig, _tun_name: &str) {}
+
+#[cfg(not(target_os = "android"))]
 pub fn remove_routes(config: &TunnelRoutingConfig, tun_name: &str) {
-    if !config.enable {
+    if !config.enable || !config.install_system_routes {
         return;
     }
 
     let mut cidrs: Vec<IpNet> = Vec::new();
     for subnet_list in config.remote_subnets.values() {
-        for cidr_str in subnet_list {
-            if let Ok(prefix) = cidr_str.parse::<IpNet>() {
+        if let Ok(expanded) = expand_cidrs(subnet_list) {
+            for prefix in expanded {
                 if !cidrs.contains(&prefix) {
                     cidrs.push(prefix);
                 }
@@ -254,6 +349,7 @@ mod tests {
             yggdrasil_routing: true,
             ipv4_address: String::new(),
             remote_subnets: subnets,
+            install_system_routes: true,
         }
     }
 
@@ -282,6 +378,7 @@ mod tests {
             yggdrasil_routing: true,
             ipv4_address: String::new(),
             remote_subnets: subnets,
+            install_system_routes: true,
         };
         let ckr = CryptoKey::new(&config).unwrap();
         assert!(ckr.v4_routes.is_empty());
@@ -425,6 +522,101 @@ mod tests {
         assert!(ckr.get_public_key_for_address("10.0.0.1".parse().unwrap()).is_some());
         assert!(ckr.get_public_key_for_address("192.168.1.100".parse().unwrap()).is_some());
         assert!(ckr.get_public_key_for_address("2001:db8::1".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn test_expand_cidrs_simple_exclude() {
+        let entries = vec!["10.0.0.0/24".to_string(), "!10.0.0.0/25".to_string()];
+        let out = expand_cidrs(&entries).unwrap();
+        // 10.0.0.0/24 minus 10.0.0.0/25 = 10.0.0.128/25
+        assert_eq!(out, vec!["10.0.0.128/25".parse::<IpNet>().unwrap()]);
+    }
+
+    #[test]
+    fn test_expand_cidrs_default_route_minus_rfc1918() {
+        let entries = vec![
+            "0.0.0.0/0".to_string(),
+            "!192.168.0.0/16".to_string(),
+        ];
+        let out = expand_cidrs(&entries).unwrap();
+        // All pieces must be prefix-aligned and cover 0.0.0.0/0 \ 192.168.0.0/16.
+        let total_addrs: u128 = out
+            .iter()
+            .map(|n| 1u128 << (32 - n.prefix_len() as u32))
+            .sum();
+        assert_eq!(total_addrs, (1u128 << 32) - (1u128 << 16));
+        // 192.168.5.1 should not be covered; 8.8.8.8 should be.
+        let blocked: IpAddr = "192.168.5.1".parse().unwrap();
+        let allowed: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!out.iter().any(|n| n.contains(&blocked)));
+        assert!(out.iter().any(|n| n.contains(&allowed)));
+    }
+
+    #[test]
+    fn test_expand_cidrs_exclude_routes_via_cryptokey() {
+        let mut subnets = HashMap::new();
+        subnets.insert(
+            dummy_key_hex(),
+            vec!["10.0.0.0/24".to_string(), "!10.0.0.5/32".to_string()],
+        );
+        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        // 10.0.0.5 must NOT resolve; surrounding addrs must.
+        assert_eq!(
+            ckr.get_public_key_for_address("10.0.0.5".parse().unwrap()),
+            None
+        );
+        assert_eq!(
+            ckr.get_public_key_for_address("10.0.0.4".parse().unwrap()),
+            Some([0x01u8; 32])
+        );
+        assert_eq!(
+            ckr.get_public_key_for_address("10.0.0.6".parse().unwrap()),
+            Some([0x01u8; 32])
+        );
+    }
+
+    #[test]
+    fn test_expand_cidrs_exclude_fully_covers_include() {
+        // Entire include is excluded → no routes.
+        let entries = vec!["10.0.0.0/24".to_string(), "!10.0.0.0/8".to_string()];
+        let out = expand_cidrs(&entries).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_expand_cidrs_exclude_outside_include_ignored() {
+        let entries = vec!["10.0.0.0/24".to_string(), "!192.168.0.0/16".to_string()];
+        let out = expand_cidrs(&entries).unwrap();
+        assert_eq!(out, vec!["10.0.0.0/24".parse::<IpNet>().unwrap()]);
+    }
+
+    #[test]
+    fn test_expand_cidrs_excludes_are_family_scoped() {
+        // An IPv6 exclude must not affect an IPv4 include and vice versa.
+        let entries = vec![
+            "10.0.0.0/24".to_string(),
+            "2001:db8::/32".to_string(),
+            "!2001:db8:1::/48".to_string(),
+        ];
+        let out = expand_cidrs(&entries).unwrap();
+        assert!(out.contains(&"10.0.0.0/24".parse::<IpNet>().unwrap()));
+        // IPv6 side got split.
+        assert!(!out.contains(&"2001:db8::/32".parse::<IpNet>().unwrap()));
+    }
+
+    #[test]
+    fn test_expand_cidrs_multiple_excludes() {
+        let entries = vec![
+            "10.0.0.0/24".to_string(),
+            "!10.0.0.5/32".to_string(),
+            "!10.0.0.10/32".to_string(),
+        ];
+        let out = expand_cidrs(&entries).unwrap();
+        let blocked1: IpAddr = "10.0.0.5".parse().unwrap();
+        let blocked2: IpAddr = "10.0.0.10".parse().unwrap();
+        assert!(!out.iter().any(|n| n.contains(&blocked1)));
+        assert!(!out.iter().any(|n| n.contains(&blocked2)));
+        assert!(out.iter().any(|n| n.contains(&"10.0.0.6".parse::<IpAddr>().unwrap())));
     }
 
     #[test]

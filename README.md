@@ -333,7 +333,7 @@ ipv4_address = "10.99.0.1/24"
 
 [tunnel_routing.remote_subnets]
 # Accept traffic from client's CKR subnet
-"<CLIENT_PUBLIC_KEY>" = ["10.99.0.0/24"]
+"<CLIENT_PUBLIC_KEY>" = ["10.99.0.0/32"]
 ```
 
 #### VPS system setup (Linux)
@@ -378,7 +378,7 @@ enable = true
 ipv4_address = "192.168.1.1/24"
 
 [tunnel_routing.remote_subnets]
-"<SITE_B_KEY>" = ["192.168.2.0/24"]
+"<SITE_B_KEY>" = ["192.168.2.0/32"]
 ```
 
 **Site B:**
@@ -388,7 +388,7 @@ enable = true
 ipv4_address = "192.168.2.1/24"
 
 [tunnel_routing.remote_subnets]
-"<SITE_A_KEY>" = ["192.168.1.0/24"]
+"<SITE_A_KEY>" = ["192.168.1.0/32"]
 ```
 
 Hosts on each side can then reach the other network through their Yggdrasil gateway node.

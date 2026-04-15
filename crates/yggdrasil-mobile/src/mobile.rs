@@ -74,6 +74,18 @@ pub struct YggdrasilConfig {
     pub if_mtu: u64,
     pub multicast_interfaces: Vec<MulticastInterfaceConfig>,
     pub node_info_name: String,
+    pub tunnel_routing: TunnelRoutingConfig,
+}
+
+pub struct CkrRemoteSubnet {
+    pub public_key: String,
+    pub cidrs: Vec<String>,
+}
+
+pub struct TunnelRoutingConfig {
+    pub enable: bool,
+    pub ipv4_address: String,
+    pub remote_subnets: Vec<CkrRemoteSubnet>,
 }
 
 pub struct YggdrasilState {
@@ -106,6 +118,13 @@ fn convert_config(cfg: &YggdrasilConfig) -> config::Config {
         );
     }
 
+    let remote_subnets: std::collections::HashMap<String, Vec<String>> = cfg
+        .tunnel_routing
+        .remote_subnets
+        .iter()
+        .map(|r| (r.public_key.clone(), r.cidrs.clone()))
+        .collect();
+
     config::Config {
         private_key: cfg.private_key.clone(),
         peers: cfg.peers.clone(),
@@ -128,6 +147,16 @@ fn convert_config(cfg: &YggdrasilConfig) -> config::Config {
                 password: m.password.clone(),
             })
             .collect(),
+        tunnel_routing: config::TunnelRoutingConfig {
+            enable: cfg.tunnel_routing.enable,
+            // ckrYggdrasilRouting is always on for the Android app.
+            yggdrasil_routing: true,
+            ipv4_address: cfg.tunnel_routing.ipv4_address.clone(),
+            remote_subnets,
+            // Android's VpnService owns system routing; never let the core
+            // try to install OS routes from the unprivileged app process.
+            install_system_routes: false,
+        },
     }
 }
 
@@ -158,6 +187,11 @@ fn config_to_udl(cfg: &config::Config) -> YggdrasilConfig {
             })
             .collect(),
         node_info_name,
+        tunnel_routing: TunnelRoutingConfig {
+            enable: false,
+            ipv4_address: String::new(),
+            remote_subnets: Vec::new(),
+        },
     }
 }
 
@@ -166,6 +200,29 @@ fn config_to_udl(cfg: &config::Config) -> YggdrasilConfig {
 pub fn generate_config() -> YggdrasilConfig {
     let cfg = config::Config::generate();
     config_to_udl(&cfg)
+}
+
+pub fn expand_ckr_cidrs(config: TunnelRoutingConfig) -> Vec<String> {
+    if !config.enable {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for subnet in &config.remote_subnets {
+        match yggdrasil::ckr::expand_cidrs(&subnet.cidrs) {
+            Ok(prefixes) => {
+                for p in prefixes {
+                    let s = p.to_string();
+                    if !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("expand_ckr_cidrs: {}", e);
+            }
+        }
+    }
+    out
 }
 
 pub fn get_version() -> String {
@@ -220,6 +277,8 @@ impl YggdrasilMobile {
             .signing_key()
             .map_err(|e| YggdrasilError::Config(e))?;
 
+        let ckr_cfg = rust_config.tunnel_routing.clone();
+
         let core = self.rt.block_on(async {
             let core = Core::new(signing_key, rust_config);
             core.init_links().await;
@@ -227,7 +286,7 @@ impl YggdrasilMobile {
             core
         });
 
-        let rwc = ReadWriteCloser::new(core.clone(), core.mtu());
+        let rwc = ReadWriteCloser::new(core.clone(), core.mtu(), Some(&ckr_cfg));
         core.set_path_notify(rwc.clone());
 
         let (stop_tx, _) = broadcast::channel(1);

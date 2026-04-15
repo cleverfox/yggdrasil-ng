@@ -658,6 +658,8 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_yggdrasil_mobile_checksum_func_expand_ckr_cidrs(
+    ): Short
     external fun uniffi_yggdrasil_mobile_checksum_func_generate_config(
     ): Short
     external fun uniffi_yggdrasil_mobile_checksum_func_get_version(
@@ -753,6 +755,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_yggdrasil_mobile_fn_init_callback_vtable_yggdrasilstatelistener(`vtable`: UniffiVTableCallbackInterfaceYggdrasilStateListener,
     ): Unit
+    external fun uniffi_yggdrasil_mobile_fn_func_expand_ckr_cidrs(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_yggdrasil_mobile_fn_func_generate_config(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_yggdrasil_mobile_fn_func_get_version(uniffi_out_err: UniffiRustCallStatus, 
@@ -876,6 +880,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_yggdrasil_mobile_checksum_func_expand_ckr_cidrs() != 48226.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_yggdrasil_mobile_checksum_func_generate_config() != 33945.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1944,6 +1951,53 @@ public object FfiConverterTypeAndroidNetworkInterface: FfiConverterRustBuffer<An
 
 
 
+/**
+ * One CKR routing entry: a destination public key and the CIDRs to send to it.
+ */
+data class CkrRemoteSubnet (
+    /**
+     * Hex-encoded ed25519 public key (64 hex chars = 32 bytes).
+     */
+    var `publicKey`: kotlin.String
+    , 
+    /**
+     * CIDR prefixes routed to this key, e.g. "10.0.0.0/24" or "2001:db8::/32".
+     */
+    var `cidrs`: List<kotlin.String>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCkrRemoteSubnet: FfiConverterRustBuffer<CkrRemoteSubnet> {
+    override fun read(buf: ByteBuffer): CkrRemoteSubnet {
+        return CkrRemoteSubnet(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CkrRemoteSubnet) = (
+            FfiConverterString.allocationSize(value.`publicKey`) +
+            FfiConverterSequenceString.allocationSize(value.`cidrs`)
+    )
+
+    override fun write(value: CkrRemoteSubnet, buf: ByteBuffer) {
+            FfiConverterString.write(value.`publicKey`, buf)
+            FfiConverterSequenceString.write(value.`cidrs`, buf)
+    }
+}
+
+
+
 data class MulticastInterfaceConfig (
     var `regex`: kotlin.String
     , 
@@ -2002,6 +2056,62 @@ public object FfiConverterTypeMulticastInterfaceConfig: FfiConverterRustBuffer<M
 
 
 
+/**
+ * CKR (Crypto-Key Routing) configuration.
+ */
+data class TunnelRoutingConfig (
+    /**
+     * Master switch for CKR.
+     */
+    var `enable`: kotlin.Boolean
+    , 
+    /**
+     * Optional IPv4 address in CIDR notation to assign to the tunnel.
+     * Empty string disables IPv4 tunneling.
+     */
+    var `ipv4Address`: kotlin.String
+    , 
+    /**
+     * Remote subnets to route through Yggdrasil peers.
+     */
+    var `remoteSubnets`: List<CkrRemoteSubnet>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTunnelRoutingConfig: FfiConverterRustBuffer<TunnelRoutingConfig> {
+    override fun read(buf: ByteBuffer): TunnelRoutingConfig {
+        return TunnelRoutingConfig(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeCkrRemoteSubnet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TunnelRoutingConfig) = (
+            FfiConverterBoolean.allocationSize(value.`enable`) +
+            FfiConverterString.allocationSize(value.`ipv4Address`) +
+            FfiConverterSequenceTypeCkrRemoteSubnet.allocationSize(value.`remoteSubnets`)
+    )
+
+    override fun write(value: TunnelRoutingConfig, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`enable`, buf)
+            FfiConverterString.write(value.`ipv4Address`, buf)
+            FfiConverterSequenceTypeCkrRemoteSubnet.write(value.`remoteSubnets`, buf)
+    }
+}
+
+
+
 data class YggdrasilConfig (
     /**
      * Hex-encoded ed25519 keypair (128 hex chars = 64 bytes).
@@ -2032,6 +2142,11 @@ data class YggdrasilConfig (
      * Device name for NodeInfo.
      */
     var `nodeInfoName`: kotlin.String
+    , 
+    /**
+     * Crypto-key tunnel routing (CKR) configuration.
+     */
+    var `tunnelRouting`: TunnelRoutingConfig
     
 ){
     
@@ -2054,6 +2169,7 @@ public object FfiConverterTypeYggdrasilConfig: FfiConverterRustBuffer<YggdrasilC
             FfiConverterULong.read(buf),
             FfiConverterSequenceTypeMulticastInterfaceConfig.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterTypeTunnelRoutingConfig.read(buf),
         )
     }
 
@@ -2063,7 +2179,8 @@ public object FfiConverterTypeYggdrasilConfig: FfiConverterRustBuffer<YggdrasilC
             FfiConverterSequenceString.allocationSize(value.`listen`) +
             FfiConverterULong.allocationSize(value.`ifMtu`) +
             FfiConverterSequenceTypeMulticastInterfaceConfig.allocationSize(value.`multicastInterfaces`) +
-            FfiConverterString.allocationSize(value.`nodeInfoName`)
+            FfiConverterString.allocationSize(value.`nodeInfoName`) +
+            FfiConverterTypeTunnelRoutingConfig.allocationSize(value.`tunnelRouting`)
     )
 
     override fun write(value: YggdrasilConfig, buf: ByteBuffer) {
@@ -2073,6 +2190,7 @@ public object FfiConverterTypeYggdrasilConfig: FfiConverterRustBuffer<YggdrasilC
             FfiConverterULong.write(value.`ifMtu`, buf)
             FfiConverterSequenceTypeMulticastInterfaceConfig.write(value.`multicastInterfaces`, buf)
             FfiConverterString.write(value.`nodeInfoName`, buf)
+            FfiConverterTypeTunnelRoutingConfig.write(value.`tunnelRouting`, buf)
     }
 }
 
@@ -2321,6 +2439,34 @@ public object FfiConverterSequenceTypeAndroidNetworkInterface: FfiConverterRustB
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeCkrRemoteSubnet: FfiConverterRustBuffer<List<CkrRemoteSubnet>> {
+    override fun read(buf: ByteBuffer): List<CkrRemoteSubnet> {
+        val len = buf.getInt()
+        return List<CkrRemoteSubnet>(len) {
+            FfiConverterTypeCkrRemoteSubnet.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<CkrRemoteSubnet>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCkrRemoteSubnet.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<CkrRemoteSubnet>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCkrRemoteSubnet.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeMulticastInterfaceConfig: FfiConverterRustBuffer<List<MulticastInterfaceConfig>> {
     override fun read(buf: ByteBuffer): List<MulticastInterfaceConfig> {
         val len = buf.getInt()
@@ -2342,6 +2488,22 @@ public object FfiConverterSequenceTypeMulticastInterfaceConfig: FfiConverterRust
         }
     }
 }
+        /**
+         * Expand the CKR tunnel_routing config into the minimal set of CIDRs
+         * that the core will actually route (includes minus excludes).
+         * Returns the same prefix list the core logs as "Active CKR routes".
+         * Used by Android to feed VpnService.Builder.addRoute().
+         */ fun `expandCkrCidrs`(`config`: TunnelRoutingConfig): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_yggdrasil_mobile_fn_func_expand_ckr_cidrs(
+    
+        FfiConverterTypeTunnelRoutingConfig.lower(`config`),_status)
+}
+    )
+    }
+    
+
         /**
          * Generate a new config with fresh random keys.
          */ fun `generateConfig`(): YggdrasilConfig {

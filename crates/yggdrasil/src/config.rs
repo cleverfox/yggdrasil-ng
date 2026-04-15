@@ -118,6 +118,11 @@ pub struct TunnelRoutingConfig {
     /// Example: { "aabbcc...01": ["10.0.0.0/24", "192.168.1.0/24"] }
     #[serde(default)]
     pub remote_subnets: HashMap<String, Vec<String>>,
+
+    /// Install OS routes via the system route manager. Disable on platforms
+    /// that own routing themselves (e.g. Android VpnService).
+    #[serde(default = "default_true")]
+    pub install_system_routes: bool,
 }
 
 #[cfg(feature = "ckr")]
@@ -128,6 +133,7 @@ impl Default for TunnelRoutingConfig {
             yggdrasil_routing: true,
             ipv4_address: String::new(),
             remote_subnets: HashMap::new(),
+            install_system_routes: true,
         }
     }
 }

@@ -89,8 +89,10 @@ impl TunAdapter {
         // Install CKR routes if configured
         #[cfg(feature = "ckr")]
         if let Some(ckr_cfg) = ckr_config {
-            if let Err(e) = crate::ckr::install_routes(ckr_cfg, tun_name) {
-                tracing::error!("Failed to install CKR routes: {}", e);
+            if ckr_cfg.install_system_routes {
+                if let Err(e) = crate::ckr::install_routes(ckr_cfg, tun_name) {
+                    tracing::error!("Failed to install CKR routes: {}", e);
+                }
             }
         }
 
