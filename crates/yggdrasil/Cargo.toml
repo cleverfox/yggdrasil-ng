@@ -42,6 +42,15 @@ getifaddrs = "0.6"
 default = ["ctl", "tun"]
 ctl = []
 tun = ["dep:tun-rs"]
+ckr = ["dep:ipnet", "dep:route_manager"]
+
+[dependencies.ipnet]
+version = "2"
+optional = true
+
+[dependencies.route_manager]
+version = "0.2"
+optional = true
 
 [dependencies.tun-rs]
 version = "2.8"

@@ -26,6 +26,9 @@ This project aims to provide a lightweight, self-arranging, and secure mesh netw
 - Windows service support (runs as `yggdrasil-ng` service via SCM)
 - UniFFI bindings for Android
 
+**✅ Optional (feature-gated):**
+- Crypto-Key Routing (CKR) — tunnel arbitrary IPv4/IPv6 subnets through the mesh (`--features ckr`)
+
 **⏳ Planned Features:**
 - Additional transports: QUIC, WebSocket
 - Multicast peer discovery on local networks
@@ -205,6 +208,7 @@ Yggdrasil-ng uses **TOML** format for configuration (unlike the Go version which
 | `node_info` | table | Custom node metadata (TOML table) |
 | `node_info_privacy` | bool | Hide node info from other nodes (default: false) |
 | `allowed_public_keys` | array | Whitelist of allowed peer keys (empty = allow all) |
+| `[tunnel_routing]` | table | CKR tunnel routing config (requires `ckr` feature) |
 
 **Example minimal configuration:**
 
@@ -261,6 +265,177 @@ location = "datacenter-1"
 2. Rename all fields from PascalCase to snake_case
 3. Change transport URIs to TCP-only (remove `tls://`, `quic://`, etc.)
 4. Update admin socket to TCP format if using Unix socket
+
+## Crypto-Key Routing (CKR)
+
+CKR enables tunneling arbitrary IPv4/IPv6 traffic through the Yggdrasil mesh by mapping IP subnets to node public keys. This turns Yggdrasil into a point-to-point VPN — useful for exit-node setups, site-to-site tunnels, or routing specific subnets between nodes.
+
+CKR requires building with the `ckr` feature:
+
+```bash
+cargo build --release --features ckr
+```
+
+### Configuration
+
+Add a `[tunnel_routing]` section to your `yggdrasil.toml`:
+
+```toml
+[tunnel_routing]
+enable = true
+yggdrasil_routing = true
+ipv4_address = "10.99.0.1/24"
+
+[tunnel_routing.remote_subnets]
+"peer_public_key_hex" = ["10.0.0.0/24", "192.168.1.0/24"]
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `enable` | bool | Enable/disable CKR |
+| `yggdrasil_routing` | bool | Also route standard Yggdrasil `0200::/7` traffic (default: true) |
+| `ipv4_address` | string | IPv4 address to assign to TUN in CIDR notation (e.g., `"10.99.0.1/24"`) |
+| `remote_subnets` | table | Maps hex public key to list of CIDRs to route via that node |
+
+System routes for all configured CIDRs are automatically installed when the TUN device starts and removed on shutdown. This works on Linux, Windows, and macOS.
+
+### Exit-Node Setup
+
+This example shows how to route all internet traffic from a client through a VPS running Yggdrasil-ng with CKR.
+
+Both nodes must be peered (directly or through the mesh) and built with `--features ckr`.
+
+#### Client configuration
+
+```toml
+[tunnel_routing]
+enable = true
+yggdrasil_routing = true
+ipv4_address = "10.99.0.2/24"
+
+[tunnel_routing.remote_subnets]
+# Route all IPv4 and IPv6 internet traffic via VPS
+"<VPS_PUBLIC_KEY>" = [
+    "0.0.0.0/1", "128.0.0.0/1",
+    "::/1", "8000::/1"
+]
+```
+
+The `0.0.0.0/1` + `128.0.0.0/1` split covers all IPv4 without overriding the system default route (which would break the Yggdrasil peering connection itself). Same idea for `::/1` + `8000::/1` for IPv6. Yggdrasil's own `0200::/7` addresses still route natively — they are checked first before CKR lookup.
+
+#### VPS (exit node) configuration
+
+```toml
+[tunnel_routing]
+enable = true
+yggdrasil_routing = true
+ipv4_address = "10.99.0.1/24"
+
+[tunnel_routing.remote_subnets]
+# Accept traffic from client's CKR subnet
+"<CLIENT_PUBLIC_KEY>" = ["10.99.0.0/24"]
+```
+
+#### VPS system setup (Linux)
+
+Enable IP forwarding and NAT so tunneled traffic can reach the internet:
+
+```bash
+# Enable IPv4 and IPv6 forwarding
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv6.conf.all.forwarding=1
+
+# IPv4 NAT (replace eth0 with your internet-facing interface)
+iptables -t nat -A POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE
+iptables -A FORWARD -i ygg0 -o eth0 -j ACCEPT
+iptables -A FORWARD -i eth0 -o ygg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# IPv6 NAT (for tunneled IPv6 traffic from Yggdrasil addresses)
+ip6tables -t nat -A POSTROUTING -s 200::/7 -o eth0 -j MASQUERADE
+ip6tables -A FORWARD -i ygg0 -o eth0 -j ACCEPT
+ip6tables -A FORWARD -i eth0 -o ygg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+To make these persistent across reboots, add the sysctl settings to `/etc/sysctl.d/` and save the iptables rules with `iptables-save`/`ip6tables-save`.
+
+#### Testing
+
+From the client, verify your traffic exits through the VPS:
+
+```bash
+curl ifconfig.me          # Should show VPS IPv4 address
+curl -6 ifconfig.me       # Should show VPS IPv6 address
+```
+
+### Site-to-Site Tunnel
+
+CKR can also connect two private networks. For example, to link `192.168.1.0/24` (Site A) with `192.168.2.0/24` (Site B):
+
+**Site A:**
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "192.168.1.1/24"
+
+[tunnel_routing.remote_subnets]
+"<SITE_B_KEY>" = ["192.168.2.0/24"]
+```
+
+**Site B:**
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "192.168.2.1/24"
+
+[tunnel_routing.remote_subnets]
+"<SITE_A_KEY>" = ["192.168.1.0/24"]
+```
+
+Hosts on each side can then reach the other network through their Yggdrasil gateway node.
+
+### Private VPN (Multi-Node)
+
+CKR can create a virtual private network where multiple nodes share a common IPv4 subnet and communicate directly over private IPs.
+Each node gets an address from the shared range (e.g., `10.99.0.0/24`) and has CKR routes pointing to every other node.
+
+**Node A** (`10.99.0.1`):
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "10.99.0.1/24"
+
+[tunnel_routing.remote_subnets]
+"<NODE_B_KEY>" = ["10.99.0.2/32"]
+"<NODE_C_KEY>" = ["10.99.0.3/32"]
+```
+
+**Node B** (`10.99.0.2`):
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "10.99.0.2/24"
+
+[tunnel_routing.remote_subnets]
+"<NODE_A_KEY>" = ["10.99.0.1/32"]
+"<NODE_C_KEY>" = ["10.99.0.3/32"]
+```
+
+**Node C** (`10.99.0.3`):
+```toml
+[tunnel_routing]
+enable = true
+ipv4_address = "10.99.0.3/24"
+
+[tunnel_routing.remote_subnets]
+"<NODE_A_KEY>" = ["10.99.0.1/32"]
+"<NODE_B_KEY>" = ["10.99.0.2/32"]
+```
+
+Any IPv4 service works transparently between nodes — SSH, HTTP, SMB, databases, etc.
+The nodes don't need to be directly peered; traffic routes through the Yggdrasil mesh automatically.
+
+Note that each node needs routes to every other node, so the config grows with the number of participants.
+For large deployments, consider a script to generate configs.
 
 ## Running as a Windows Service
 

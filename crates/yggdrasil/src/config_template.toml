@@ -58,3 +58,12 @@ listen = true
 # port = 0
 # priority = 0
 # password = ""
+
+# Crypto-Key Routing (CKR) — tunnel arbitrary IPv4/IPv6 subnets through
+# the Yggdrasil mesh. Requires the "ckr" feature to be enabled at build time.
+# [tunnel_routing]
+# enable = true
+# yggdrasil_routing = true
+# ipv4_address = "10.99.0.1/24"  # IPv4 address for the TUN (exit-node/VPN use)
+# [tunnel_routing.remote_subnets]
+# "peer_public_key_hex" = ["10.0.0.0/24", "192.168.1.0/24"]

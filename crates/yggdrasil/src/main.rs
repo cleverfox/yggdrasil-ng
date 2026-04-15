@@ -250,7 +250,12 @@ async fn run_node(
 
     // Create IPv6 RWC bridge
     let mtu = core.mtu();
-    let rwc = ReadWriteCloser::new(core.clone(), mtu);
+    let rwc = ReadWriteCloser::new(
+        core.clone(),
+        mtu,
+        #[cfg(feature = "ckr")]
+        Some(&config.tunnel_routing),
+    );
 
     // Wire up path_notify: when ironwood discovers a new path, update the key store
     core.set_path_notify(rwc.clone());
@@ -262,7 +267,15 @@ async fn run_node(
         let subnet_str = core.subnet().to_string();
         let tun_mtu = config.if_mtu.min(mtu).min(65535) as u16;
 
-        match TunAdapter::new(&config.if_name, rwc.clone(), &addr_str, &subnet_str, tun_mtu).await {
+        match TunAdapter::new(
+            &config.if_name,
+            rwc.clone(),
+            &addr_str,
+            &subnet_str,
+            tun_mtu,
+            #[cfg(feature = "ckr")]
+            Some(&config.tunnel_routing),
+        ).await {
             Ok(tun) => {
                 tracing::info!("TUN adapter started");
                 Some(tun)
@@ -297,6 +310,18 @@ async fn run_node(
     tracing::info!("Shutting down...");
 
     // Cleanup
+    // Remove CKR routes before TUN is destroyed (critical on Windows where
+    // routes don't auto-dissolve when the interface goes away).
+    #[cfg(feature = "ckr")]
+    if config.tunnel_routing.enable && config.if_name != "none" {
+        let tun_name = if config.if_name == "auto" {
+            if cfg!(windows) { "Yggdrasil" } else { "ygg0" }
+        } else {
+            &config.if_name
+        };
+        yggdrasil::ckr::remove_routes(&config.tunnel_routing, tun_name);
+    }
+
     core.close_multicast().await;
     if let Some(admin) = &admin {
         admin.close();

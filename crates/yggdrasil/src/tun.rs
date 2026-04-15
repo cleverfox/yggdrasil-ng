@@ -2,6 +2,8 @@
 // Disable it with --no-default-features for library/VpnService builds.
 #![cfg(feature = "tun")]
 
+#[cfg(feature = "ckr")]
+use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
@@ -24,12 +26,14 @@ impl TunAdapter {
     /// `addr`: the Yggdrasil IPv6 address string
     /// `subnet`: the /64 subnet string (for routing)
     /// `mtu`: the MTU for the TUN interface
+    /// `ckr_config`: optional CKR tunnel routing config (for route installation)
     pub async fn new(
         name: &str,
         rwc: Arc<ReadWriteCloser>,
         addr: &str,
         _subnet: &str,
         mtu: u16,
+        #[cfg(feature = "ckr")] ckr_config: Option<&crate::config::TunnelRoutingConfig>,
     ) -> Result<Self, String> {
         if name == "none" {
             return Err("TUN disabled".to_string());
@@ -58,6 +62,16 @@ impl TunAdapter {
             .ipv6(ip, 7u8)
             .mtu(mtu);
 
+        // Assign IPv4 address to TUN if configured in CKR
+        #[cfg(feature = "ckr")]
+        if let Some(ckr_cfg) = ckr_config {
+            if ckr_cfg.enable && !ckr_cfg.ipv4_address.is_empty() {
+                let (v4_addr, v4_prefix) = parse_ipv4_cidr(&ckr_cfg.ipv4_address)?;
+                builder = builder.ipv4(v4_addr, v4_prefix, None);
+                tracing::info!("CKR: assigning IPv4 address {} to TUN", ckr_cfg.ipv4_address);
+            }
+        }
+
         #[cfg(windows)]
         {
             // Only call device_guid on Windows
@@ -71,6 +85,14 @@ impl TunAdapter {
         let device = Arc::new(device);
 
         tracing::info!("TUN device '{}' created with address {} and MTU {}", tun_name, addr, mtu);
+
+        // Install CKR routes if configured
+        #[cfg(feature = "ckr")]
+        if let Some(ckr_cfg) = ckr_config {
+            if let Err(e) = crate::ckr::install_routes(ckr_cfg, tun_name) {
+                tracing::error!("Failed to install CKR routes: {}", e);
+            }
+        }
 
         // Channel for packets from network → TUN
         let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
@@ -154,4 +176,23 @@ async fn tun_write_loop(
             return;
         }
     }
+}
+
+/// Parse an IPv4 CIDR string like "10.99.0.1/24" into (Ipv4Addr, prefix_len).
+#[cfg(feature = "ckr")]
+fn parse_ipv4_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("invalid IPv4 CIDR '{}': expected addr/prefix", cidr));
+    }
+    let addr: Ipv4Addr = parts[0]
+        .parse()
+        .map_err(|e| format!("invalid IPv4 address '{}': {}", parts[0], e))?;
+    let prefix: u8 = parts[1]
+        .parse()
+        .map_err(|e| format!("invalid prefix length '{}': {}", parts[1], e))?;
+    if prefix > 32 {
+        return Err(format!("prefix length {} exceeds 32", prefix));
+    }
+    Ok((addr, prefix))
 }

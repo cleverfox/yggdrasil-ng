@@ -1,3 +1,6 @@
+#[cfg(feature = "ckr")]
+use std::collections::HashMap;
+
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
@@ -85,6 +88,48 @@ pub struct Config {
     /// Multicast interface configurations for LAN peer discovery.
     #[serde(default = "default_multicast_interfaces")]
     pub multicast_interfaces: Vec<MulticastInterfaceConfig>,
+
+    /// Tunnel routing (CKR) configuration.
+    #[cfg(feature = "ckr")]
+    #[serde(default)]
+    pub tunnel_routing: TunnelRoutingConfig,
+}
+
+/// Crypto-Key Routing (CKR) tunnel configuration.
+/// Maps IP subnets to Yggdrasil node public keys for VPN tunneling.
+#[cfg(feature = "ckr")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TunnelRoutingConfig {
+    /// Enable or disable tunnel routing.
+    #[serde(default)]
+    pub enable: bool,
+
+    /// Also route standard Yggdrasil 0200::/7 traffic (default: true).
+    #[serde(default = "default_true")]
+    pub yggdrasil_routing: bool,
+
+    /// IPv4 address to assign to the TUN interface, in CIDR notation.
+    /// Required for exit-node / VPN scenarios where IPv4 traffic is tunneled.
+    /// Example: "10.99.0.1/24"
+    #[serde(default)]
+    pub ipv4_address: String,
+
+    /// Remote subnets: maps hex public key -> list of CIDRs.
+    /// Example: { "aabbcc...01": ["10.0.0.0/24", "192.168.1.0/24"] }
+    #[serde(default)]
+    pub remote_subnets: HashMap<String, Vec<String>>,
+}
+
+#[cfg(feature = "ckr")]
+impl Default for TunnelRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            yggdrasil_routing: true,
+            ipv4_address: String::new(),
+            remote_subnets: HashMap::new(),
+        }
+    }
 }
 
 fn default_if_name() -> String {
@@ -112,6 +157,8 @@ impl Default for Config {
             node_info_privacy: false,
             allowed_public_keys: Vec::new(),
             multicast_interfaces: default_multicast_interfaces(),
+            #[cfg(feature = "ckr")]
+            tunnel_routing: TunnelRoutingConfig::default(),
         }
     }
 }

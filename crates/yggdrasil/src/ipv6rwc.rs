@@ -7,6 +7,12 @@ use tokio::sync::Mutex;
 
 use crate::address::{addr_for_key, is_valid_address, is_valid_subnet, subnet_for_key, Address, Subnet};
 use crate::core::Core;
+#[cfg(feature = "ckr")]
+use {
+    std::net::IpAddr,
+    crate::ckr::CryptoKey,
+    crate::config::TunnelRoutingConfig,
+};
 
 const KEY_STORE_TIMEOUT: Duration = Duration::from_secs(120);
 const IPV6_HEADER_LEN: usize = 40;
@@ -25,12 +31,15 @@ struct BufferedPacket {
 }
 
 /// Bridges IPv6 traffic (TUN) with the ironwood-based Core.
+/// When the `ckr` feature is enabled, also handles IPv4 and CKR-routed traffic.
 pub struct ReadWriteCloser {
     core: Arc<Core>,
     address: Address,
     subnet: Subnet,
     inner: Mutex<KeyStoreInner>,
     mtu: u64,
+    #[cfg(feature = "ckr")]
+    ckr: Option<CryptoKey>,
 }
 
 struct KeyStoreInner {
@@ -42,9 +51,24 @@ struct KeyStoreInner {
 }
 
 impl ReadWriteCloser {
-    pub fn new(core: Arc<Core>, mtu: u64) -> Arc<Self> {
+    pub fn new(
+        core: Arc<Core>,
+        mtu: u64,
+        #[cfg(feature = "ckr")] ckr_config: Option<&TunnelRoutingConfig>,
+    ) -> Arc<Self> {
         let address = *core.address();
         let subnet = *core.subnet();
+
+        #[cfg(feature = "ckr")]
+        let ckr = ckr_config
+            .filter(|c| c.enable)
+            .map(|c| {
+                CryptoKey::new(c).unwrap_or_else(|e| {
+                    tracing::error!("Failed to configure CKR: {}", e);
+                    panic!("CKR configuration error: {}", e);
+                })
+            });
+
         Arc::new(Self {
             core,
             address,
@@ -57,6 +81,8 @@ impl ReadWriteCloser {
                 subnet_buffer: HashMap::new(),
             }),
             mtu,
+            #[cfg(feature = "ckr")]
+            ckr,
         })
     }
 
@@ -78,27 +104,58 @@ impl ReadWriteCloser {
             let packet = &inner_buf[..n];
             tracing::debug!("RWC read {} bytes from {:?}, first byte={:#x}", n, from_addr, packet[0]);
 
-            // Must be IPv6
-            if packet[0] & 0xf0 != 0x60 {
-                tracing::debug!("RWC dropping non-IPv6 packet (version={})", packet[0] >> 4);
+            let is_ip4 = packet[0] & 0xf0 == 0x40;
+            let is_ip6 = packet[0] & 0xf0 == 0x60;
+
+            #[cfg(feature = "ckr")]
+            let ckr_active = self.ckr.is_some();
+            #[cfg(not(feature = "ckr"))]
+            let ckr_active = false;
+
+            if !ckr_active {
+                // Standard mode: IPv6 only
+                if !is_ip6 {
+                    tracing::debug!("RWC dropping non-IPv6 packet (version={})", packet[0] >> 4);
+                    continue;
+                }
+            } else if !is_ip4 && !is_ip6 {
+                // CKR mode: IPv4 or IPv6
+                tracing::debug!("RWC dropping non-IP packet (version={})", packet[0] >> 4);
                 continue;
             }
 
-            if n < IPV6_HEADER_LEN {
+            if is_ip6 && n < IPV6_HEADER_LEN {
                 tracing::debug!("RWC dropping short packet ({} < {})", n, IPV6_HEADER_LEN);
                 continue;
             }
 
-            // MTU enforcement: if packet too large, send ICMPv6 PTB back
+            // MTU enforcement
             if n as u64 > self.mtu {
-                let ptb = build_icmpv6_ptb(packet, self.mtu as u32);
-                if let Some(ptb) = ptb {
-                    let _ = self.core.write_to(&ptb, &from_addr).await;
+                if is_ip6 {
+                    let ptb = build_icmpv6_ptb(packet, self.mtu as u32);
+                    if let Some(ptb) = ptb {
+                        let _ = self.core.write_to(&ptb, &from_addr).await;
+                    }
                 }
                 continue;
             }
 
-            // Extract src and dst IPv6 addresses
+            let from_key = from_addr.0;
+            self.update_key(from_key).await;
+
+            // CKR path: dual-mode validation
+            #[cfg(feature = "ckr")]
+            if let Some(ref ckr) = self.ckr {
+                let accepted = self.ckr_read_validate(ckr, packet, is_ip4, is_ip6, &from_key).await;
+                if !accepted {
+                    continue;
+                }
+                let copy_len = n.min(buf.len());
+                buf[..copy_len].copy_from_slice(&packet[..copy_len]);
+                return Ok(copy_len);
+            }
+
+            // Standard (non-CKR) path: IPv6 only validation
             let mut src_ip = [0u8; 16];
             let mut dst_ip = [0u8; 16];
             src_ip.copy_from_slice(&packet[8..24]);
@@ -114,10 +171,6 @@ impl ReadWriteCloser {
                 tracing::debug!("RWC dropping: dst {:x?} is neither our addr nor subnet", &dst_ip[..4]);
                 continue;
             }
-
-            // Update key mapping from source
-            let from_key = from_addr.0;
-            self.update_key(from_key).await;
 
             // Verify source address matches the key we got it from
             let src_valid = {
@@ -147,12 +200,27 @@ impl ReadWriteCloser {
 
     /// Write a packet from the TUN to the network (Core).
     pub async fn write(&self, buf: &[u8]) -> Result<usize, String> {
+        let is_ip6 = buf.first().map_or(false, |b| b & 0xf0 == 0x60);
+
+        // CKR path: handle IPv4 and non-Yggdrasil IPv6 destinations
+        #[cfg(feature = "ckr")]
+        if let Some(ref ckr) = self.ckr {
+            let is_ip4 = buf.first().map_or(false, |b| b & 0xf0 == 0x40);
+            if !is_ip4 && !is_ip6 {
+                return Ok(buf.len()); // silently drop non-IP
+            }
+            if is_ip6 && buf.len() < IPV6_HEADER_LEN {
+                return Ok(buf.len());
+            }
+            return self.ckr_write(ckr, buf, is_ip4, is_ip6).await;
+        }
+
+        // Standard (non-CKR) path: IPv6 only
         if buf.len() < IPV6_HEADER_LEN {
             return Err("packet too short".to_string());
         }
 
-        // Must be IPv6
-        if buf[0] & 0xf0 != 0x60 {
+        if !is_ip6 {
             return Err("not an IPv6 packet".to_string());
         }
 
@@ -299,6 +367,156 @@ impl ReadWriteCloser {
 
     pub fn mtu(&self) -> u64 {
         self.mtu
+    }
+
+    // --- CKR helper methods ---
+
+    /// CKR inbound validation: check whether a received packet should be
+    /// delivered to the TUN based on CKR routing rules.
+    /// Returns true if the packet is accepted.
+    #[cfg(feature = "ckr")]
+    async fn ckr_read_validate(
+        &self,
+        ckr: &CryptoKey,
+        packet: &[u8],
+        is_ip4: bool,
+        is_ip6: bool,
+        from_key: &[u8; 32],
+    ) -> bool {
+        // For IPv6 + yggdrasil_routing: check if source matches sender's Ygg address/subnet
+        if is_ip6 && ckr.yggdrasil_routing() {
+            let mut src_ip = [0u8; 16];
+            src_ip.copy_from_slice(&packet[8..24]);
+
+            let store = self.inner.lock().await;
+            if let Some(info) = store.key_to_info.get(from_key) {
+                let src_addr_match = src_ip == info.address.0;
+                let mut src_subnet_bytes = [0u8; 8];
+                src_subnet_bytes.copy_from_slice(&src_ip[..8]);
+                let src_subnet_match = src_subnet_bytes == info.subnet.0;
+                if src_addr_match || src_subnet_match {
+                    return true;
+                }
+            }
+            drop(store);
+        }
+
+        // For IPv4 or non-Ygg IPv6: validate source against CKR routing table
+        let src_addr = if is_ip4 {
+            if packet.len() < 20 {
+                return false;
+            }
+            let mut addr_bytes = [0u8; 4];
+            addr_bytes.copy_from_slice(&packet[12..16]);
+            IpAddr::from(addr_bytes)
+        } else {
+            // IPv6
+            let mut addr_bytes = [0u8; 16];
+            addr_bytes.copy_from_slice(&packet[8..24]);
+            IpAddr::from(addr_bytes)
+        };
+
+        // Look up the source address in CKR table and verify
+        // the route's public key matches the actual sender
+        if let Some(expected_key) = ckr.get_public_key_for_address(src_addr) {
+            if &expected_key == from_key {
+                return true;
+            }
+            tracing::debug!("CKR dropping: source {} key mismatch", src_addr);
+        } else {
+            tracing::debug!("CKR dropping: no route for source {}", src_addr);
+        }
+
+        false
+    }
+
+    /// CKR outbound routing: route a packet from TUN to the network
+    /// using CKR routing table for non-Yggdrasil destinations.
+    #[cfg(feature = "ckr")]
+    async fn ckr_write(
+        &self,
+        ckr: &CryptoKey,
+        buf: &[u8],
+        is_ip4: bool,
+        is_ip6: bool,
+    ) -> Result<usize, String> {
+        // Extract destination address
+        let mut dst_addr_bytes = [0u8; 16];
+        let mut dst_subnet_prefix = [0u8; 8];
+
+        if is_ip4 {
+            if buf.len() < 20 {
+                return Ok(buf.len());
+            }
+            dst_addr_bytes[..4].copy_from_slice(&buf[16..20]);
+        } else {
+            dst_addr_bytes.copy_from_slice(&buf[24..40]);
+            dst_subnet_prefix.copy_from_slice(&buf[24..32]);
+        }
+
+        // Try Yggdrasil routing first (if enabled and it's IPv6)
+        if is_ip6 && ckr.yggdrasil_routing() {
+            let dst_addr_valid = is_valid_address(&dst_addr_bytes);
+            let dst_subnet_valid = is_valid_subnet(&dst_subnet_prefix);
+
+            if dst_addr_valid || dst_subnet_valid {
+                // Use standard Yggdrasil routing path
+                let key = {
+                    let store = self.inner.lock().await;
+                    if dst_addr_valid {
+                        store.addr_to_info.get(&dst_addr_bytes).copied()
+                    } else {
+                        store.subnet_to_info.get(&dst_subnet_prefix).copied()
+                    }
+                };
+
+                if let Some(key) = key {
+                    let addr = Addr(key);
+                    return self
+                        .core
+                        .write_to(buf, &addr)
+                        .await
+                        .map_err(|e| format!("core write: {}", e));
+                } else {
+                    // Buffer and lookup
+                    let mut store = self.inner.lock().await;
+                    let buffered = BufferedPacket {
+                        data: buf.to_vec(),
+                        time: Instant::now(),
+                    };
+                    let lookup_key = if dst_addr_valid {
+                        store.addr_buffer.insert(dst_addr_bytes, buffered);
+                        Address(dst_addr_bytes).get_key()
+                    } else {
+                        store.subnet_buffer.insert(dst_subnet_prefix, buffered);
+                        Subnet(dst_subnet_prefix).get_key()
+                    };
+                    drop(store);
+                    self.core.send_lookup(Addr(lookup_key)).await;
+                    return Ok(buf.len());
+                }
+            }
+        }
+
+        // CKR routing: look up destination in CKR table
+        let dst_ip = if is_ip4 {
+            let mut addr4 = [0u8; 4];
+            addr4.copy_from_slice(&buf[16..20]);
+            IpAddr::from(addr4)
+        } else {
+            IpAddr::from(dst_addr_bytes)
+        };
+
+        if let Some(key) = ckr.get_public_key_for_address(dst_ip) {
+            let addr = Addr(key);
+            self.core
+                .write_to(buf, &addr)
+                .await
+                .map_err(|e| format!("core write: {}", e))
+        } else {
+            // No route, silently drop (matches Go behavior)
+            Ok(buf.len())
+        }
     }
 }
 
