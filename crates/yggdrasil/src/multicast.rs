@@ -674,6 +674,7 @@ async fn connect_to_peer(
     let tcp = TcpStream::connect(addr)
         .await
         .map_err(|e| format!("TCP connect: {}", e))?;
+    tcp.set_nodelay(true).ok();
 
     // TLS handshake
     let client_config = core.tls_client_config.read().await.clone();
@@ -742,6 +743,7 @@ async fn start_tls_listener(
                 result = listener.accept() => {
                     match result {
                         Ok((stream, remote)) => {
+                            stream.set_nodelay(true).ok();
                             let core = core.clone();
                             let active = core.active_links.clone();
                             let acceptor = acceptor.clone();
