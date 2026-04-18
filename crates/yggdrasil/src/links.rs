@@ -97,6 +97,29 @@ impl AsyncWrite for Stream {
     }
 }
 
+/// Format a peer URI for display, resolving numeric IPv6 scope IDs to interface names.
+fn format_peer_uri(scheme: &str, addr: &SocketAddr) -> String {
+    if let SocketAddr::V6(v6) = addr {
+        let scope_id = v6.scope_id();
+        if scope_id != 0 {
+            if let Some(name) = scope_id_to_name(scope_id) {
+                return format!("{}://[{}%{}]:{}", scheme, v6.ip(), name, v6.port());
+            }
+        }
+    }
+    format!("{}://{}", scheme, addr)
+}
+
+fn scope_id_to_name(scope_id: u32) -> Option<String> {
+    let ifaces = getifaddrs::getifaddrs().ok()?;
+    for iface in ifaces {
+        if iface.index == Some(scope_id) {
+            return Some(iface.name);
+        }
+    }
+    None
+}
+
 const DEFAULT_BACKOFF_LIMIT: Duration = Duration::from_secs(4096);
 const MINIMUM_BACKOFF_LIMIT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(6);
@@ -377,8 +400,12 @@ impl ActiveLinks {
         }
     }
 
-    async fn register(&self,uri: String, inbound: bool, key: [u8; 32], priority: u8) -> (u64, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    async fn register(&self, uri: String, inbound: bool, key: [u8; 32], priority: u8) -> Option<(u64, Arc<AtomicUsize>, Arc<AtomicUsize>)> {
         let mut inner = self.inner.lock().await;
+        // Reject duplicate: same key + same direction
+        if inner.connections.values().any(|c| c.key == key && c.inbound == inbound) {
+            return None;
+        }
         let id = inner.next_id;
         inner.next_id += 1;
         let rx = Arc::new(AtomicUsize::new(0));
@@ -401,7 +428,7 @@ impl ActiveLinks {
         );
         drop(inner);
         let _ = self.peer_tx.send(PeerEvent::Connected { key, uri, inbound });
-        (id, rx, tx)
+        Some((id, rx, tx))
     }
 
     async fn unregister(&self, id: u64) {
@@ -641,11 +668,10 @@ impl Links {
                                 let opts = options.clone();
                                 let active = active.clone();
                                 let acceptor = tls_acceptor.clone();
-                                let remote_str = if acceptor.is_some() {
-                                    format!("tls://{}", remote)
-                                } else {
-                                    format!("tcp://{}", remote)
-                                };
+                                let remote_str = format_peer_uri(
+                                    if acceptor.is_some() { "tls" } else { "tcp" },
+                                    &remote,
+                                );
 
                                 tokio::spawn(async move {
                                     // Permit is held for the duration of this task
@@ -1057,11 +1083,15 @@ pub(crate) async fn handle_connection(
         remote_meta.minor_ver
     );
 
-    // Register in active links
+    // Register in active links (rejects duplicate key+direction)
     let inbound = link_type == LinkType::Incoming;
-    let (conn_id, rx_counter, tx_counter) = active
+    let (conn_id, rx_counter, tx_counter) = match active
         .register(uri.to_string(), inbound, remote_meta.public_key, priority)
-        .await;
+        .await
+    {
+        Some(r) => r,
+        None => return Err("duplicate connection".to_string()),
+    };
 
     let conn_start = Instant::now();
 

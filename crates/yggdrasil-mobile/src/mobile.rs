@@ -59,7 +59,7 @@ pub enum YggdrasilError {
 // ── UDL types ───────────────────────────────────────────────────────────────
 
 pub struct MulticastInterfaceConfig {
-    pub regex: String,
+    pub filter: String,
     pub beacon: bool,
     pub listen: bool,
     pub port: u16,
@@ -139,7 +139,7 @@ fn convert_config(cfg: &YggdrasilConfig) -> config::Config {
             .multicast_interfaces
             .iter()
             .map(|m| config::MulticastInterfaceConfig {
-                regex: m.regex.clone(),
+                filter: m.filter.clone(),
                 beacon: m.beacon,
                 listen: m.listen,
                 port: m.port,
@@ -178,7 +178,7 @@ fn config_to_udl(cfg: &config::Config) -> YggdrasilConfig {
             .multicast_interfaces
             .iter()
             .map(|m| MulticastInterfaceConfig {
-                regex: m.regex.clone(),
+                filter: m.filter.clone(),
                 beacon: m.beacon,
                 listen: m.listen,
                 port: m.port,

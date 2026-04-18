@@ -52,7 +52,7 @@ if_mtu = 65535
 # priority: connection priority (0-255)
 # password: authentication password (must match on both sides)
 [[multicast_interfaces]]
-regex = "*"
+filter = "*"
 beacon = true
 listen = true
 # port = 0

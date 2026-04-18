@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Per-interface multicast discovery configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MulticastInterfaceConfig {
-    /// Regex pattern to match network interface names.
-    #[serde(default = "default_multicast_regex")]
-    pub regex: String,
+    /// Glob pattern to match network interface names.
+    /// Accepts the legacy name `regex` for backwards compatibility
+    /// (the value has always been interpreted as a glob, despite the old name).
+    #[serde(default = "default_multicast_filter", alias = "regex")]
+    pub filter: String,
     /// Whether to send beacons on matching interfaces.
     #[serde(default = "default_true")]
     pub beacon: bool,
@@ -27,7 +29,7 @@ pub struct MulticastInterfaceConfig {
     pub password: String,
 }
 
-fn default_multicast_regex() -> String {
+fn default_multicast_filter() -> String {
     "*".to_string()
 }
 
@@ -37,7 +39,7 @@ fn default_true() -> bool {
 
 fn default_multicast_interfaces() -> Vec<MulticastInterfaceConfig> {
     vec![MulticastInterfaceConfig {
-        regex: "*".to_string(),
+        filter: "*".to_string(),
         beacon: true,
         listen: true,
         port: 0,

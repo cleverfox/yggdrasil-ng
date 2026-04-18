@@ -208,48 +208,49 @@ impl Peers {
 /// Maximum age for queued packets before applying backpressure (25ms, matches Go).
 const MAX_PACKET_AGE_SEND: Duration = Duration::from_millis(25);
 
-/// Send traffic to a peer with backpressure.
+/// Send a batch of traffic packets to their respective peers with backpressure.
 ///
-/// Traffic always goes to the `traffic_queue` (never the protocol channel)
-/// so that protocol frames and keepalives are never blocked behind large
-/// application data.  The writer drains the queue after every protocol frame
-/// and on each idle-keepalive cycle.
-async fn send_traffic_to_peer(peers: &Arc<tokio::sync::Mutex<Peers>>, peer_id: PeerId, traffic: TrafficPacket) {
-    let peers_lock = peers.lock().await;
-
-    // Find the peer handle
-    let handle = match peers_lock.get_handle(peer_id) {
-        Some(h) => h,
-        None => {
-            drop(peers_lock);
-            return;
-        }
-    };
-
-    let traffic_queue = handle.traffic_queue.clone();
-    let traffic_notify = handle.traffic_notify.clone();
-
-    drop(peers_lock);
-
-    // Apply backpressure: drop oldest from largest flow if >25ms old.
-    {
-        let mut queue = traffic_queue.lock().await;
-        if let Some(age) = queue.oldest_age() {
-            if age > MAX_PACKET_AGE_SEND {
-                if queue.drop_largest() {
-                    tracing::warn!(
-                        "send_traffic_to_peer[{}]: dropped oldest packet (age={:?} > 25ms) - backpressure applied",
-                        peer_id,
-                        age
-                    );
-                }
-            }
-        }
-        queue.push(traffic);
+/// Locks the peers mutex once to collect all queue/notify handles, then drops
+/// the lock before pushing packets. This avoids per-packet lock acquisition
+/// when `dispatch_actions` produces multiple `SendTraffic` actions in one batch.
+async fn send_traffic_to_peers_batch(peers: &Arc<tokio::sync::Mutex<Peers>>, batch: Vec<(PeerId, TrafficPacket)>) {
+    if batch.is_empty() {
+        return;
     }
 
-    // Wake the writer so it drains the queue promptly.
-    traffic_notify.notify_one();
+    // Phase 1: lock once, resolve all peer handles.
+    let resolved: Vec<(PeerId, TrafficPacket, Arc<tokio::sync::Mutex<PacketQueue>>, Arc<Notify>)> = {
+        let peers_lock = peers.lock().await;
+        batch
+            .into_iter()
+            .filter_map(|(peer_id, traffic)| {
+                peers_lock.get_handle(peer_id).map(|h| {
+                    (peer_id, traffic, h.traffic_queue.clone(), h.traffic_notify.clone())
+                })
+            })
+            .collect()
+    };
+    // peers lock is dropped here
+
+    // Phase 2: push packets and notify writers (no peers lock held).
+    for (peer_id, traffic, traffic_queue, traffic_notify) in resolved {
+        {
+            let mut queue = traffic_queue.lock().await;
+            if let Some(age) = queue.oldest_age() {
+                if age > MAX_PACKET_AGE_SEND {
+                    if queue.drop_largest() {
+                        tracing::warn!(
+                            "send_traffic_to_peer[{}]: dropped oldest packet (age={:?} > 25ms) - backpressure applied",
+                            peer_id,
+                            age
+                        );
+                    }
+                }
+            }
+            queue.push(traffic);
+        }
+        traffic_notify.notify_one();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +914,10 @@ fn peek_frame_type(data: &[u8]) -> Option<wire::PacketType> {
 // ---------------------------------------------------------------------------
 
 /// Dispatch a batch of router actions.
+///
+/// Traffic actions are collected and sent in a single batch (one peers lock
+/// acquisition) rather than locking per packet.  Protocol frames are also
+/// batched under one lock when possible.
 pub(crate) async fn dispatch_actions(
     actions: Vec<RouterAction>,
     peers: &Arc<tokio::sync::Mutex<Peers>>,
@@ -920,19 +925,18 @@ pub(crate) async fn dispatch_actions(
     traffic_tx: &mpsc::Sender<TrafficPacket>,
     path_notify_cb: &Option<Arc<dyn Fn(PublicKey) + Send + Sync>>,
 ) {
+    let mut traffic_batch: Vec<(PeerId, TrafficPacket)> = Vec::new();
+    let mut frame_batch: Vec<(PeerId, Vec<u8>)> = Vec::new();
+
     for action in actions {
         match action {
             RouterAction::DeliverTraffic { traffic } => {
-                // Use delivery queue for backpressure handling
                 if let Some(pkt) = delivery_queue.deliver(traffic).await {
-                    // Reader is waiting, send immediately via channel
                     let _ = traffic_tx.send(pkt).await;
                 }
-                // Otherwise packet was queued (or dropped if too old)
             }
             RouterAction::SendTraffic { peer_id, traffic } => {
-                // Use queuing logic for outbound traffic
-                send_traffic_to_peer(peers, peer_id, traffic).await;
+                traffic_batch.push((peer_id, traffic));
             }
             RouterAction::PathNotifyCallback { key } => {
                 if let Some(cb) = path_notify_cb {
@@ -941,10 +945,21 @@ pub(crate) async fn dispatch_actions(
             }
             other => {
                 if let Some((peer_id, frame)) = encode_action_frame(&other) {
-                    let peers = peers.lock().await;
-                    let _ = peers.send_to_peer(peer_id, PeerMessage::SendFrame(frame)).await;
+                    frame_batch.push((peer_id, frame));
                 }
             }
         }
     }
+
+    // Send protocol frames in one lock acquisition.
+    if !frame_batch.is_empty() {
+        let peers_lock = peers.lock().await;
+        for (peer_id, frame) in frame_batch {
+            let _ = peers_lock.send_to_peer(peer_id, PeerMessage::SendFrame(frame)).await;
+        }
+        drop(peers_lock);
+    }
+
+    // Send traffic in one lock acquisition.
+    send_traffic_to_peers_batch(peers, traffic_batch).await;
 }

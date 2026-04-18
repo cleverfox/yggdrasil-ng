@@ -328,7 +328,7 @@ fn discover_interfaces(core: &Core, patterns: &[MulticastInterfaceConfig]) -> Ha
             if !cfg.beacon && !cfg.listen {
                 continue;
             }
-            if !glob_match(&cfg.regex, name) {
+            if !glob_match(&cfg.filter, name) {
                 continue;
             }
 
@@ -356,7 +356,7 @@ fn discover_interfaces(core: &Core, patterns: &[MulticastInterfaceConfig]) -> Ha
 }
 
 /// Build interface map from externally provided interface info (e.g. Android ConnectivityManager).
-/// Applies the same regex pattern matching as `discover_interfaces`.
+/// Applies the same glob pattern matching as `discover_interfaces`.
 fn discover_from_external(
     core: &Core,
     patterns: &[MulticastInterfaceConfig],
@@ -375,7 +375,7 @@ fn discover_from_external(
             if !cfg.beacon && !cfg.listen {
                 continue;
             }
-            if !glob_match(&cfg.regex, &iface.name) {
+            if !glob_match(&cfg.filter, &iface.name) {
                 continue;
             }
 
@@ -638,12 +638,10 @@ async fn receiver_loop(
         // Connect to the discovered peer
         let peer_addr = SocketAddrV6::new(*from_v6.ip(), adv.port, 0, scope_id);
         let uri = format!(
-            "tls://[{}%{}]:{}?key={}&priority={}",
+            "tls://[{}%{}]:{}",
             from_v6.ip(),
             iface_name,
             adv.port,
-            hex::encode(adv.public_key),
-            priority,
         );
 
         tracing::info!(

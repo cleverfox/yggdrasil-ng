@@ -24,7 +24,7 @@ enum YggdrasilError {
 // ── Config types ────────────────────────────────────────────────────────────
 
 dictionary MulticastInterfaceConfig {
-    string  regex;
+    string  filter;
     boolean beacon;
     boolean listen;
     u16     port;
