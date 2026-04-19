@@ -67,7 +67,7 @@ impl ReadWriteCloser {
         let ckr = ckr_config
             .filter(|c| c.enable)
             .map(|c| {
-                CryptoKey::new(c).unwrap_or_else(|e| {
+                CryptoKey::new(c, core.public_key()).unwrap_or_else(|e| {
                     tracing::error!("Failed to configure CKR: {}", e);
                     panic!("CKR configuration error: {}", e);
                 })

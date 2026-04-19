@@ -275,6 +275,8 @@ async fn run_node(
             tun_mtu,
             #[cfg(feature = "ckr")]
             Some(&config.tunnel_routing),
+            #[cfg(feature = "ckr")]
+            core.public_key(),
         ).await {
             Ok(tun) => {
                 tracing::info!("TUN adapter started");
@@ -319,7 +321,7 @@ async fn run_node(
         } else {
             &config.if_name
         };
-        yggdrasil::ckr::remove_routes(&config.tunnel_routing, tun_name);
+        yggdrasil::ckr::remove_routes(&config.tunnel_routing, tun_name, core.public_key());
     }
 
     core.close_multicast().await;

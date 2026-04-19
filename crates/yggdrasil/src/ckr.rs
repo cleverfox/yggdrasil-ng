@@ -22,7 +22,11 @@ pub struct CryptoKey {
 
 impl CryptoKey {
     /// Build a CKR routing table from configuration.
-    pub fn new(config: &TunnelRoutingConfig) -> Result<Self, String> {
+    ///
+    /// Routes whose destination equals `self_key` are silently dropped — a
+    /// shared config can thus be distributed to every node without each
+    /// needing a node-specific copy.
+    pub fn new(config: &TunnelRoutingConfig, self_key: &[u8; 32]) -> Result<Self, String> {
         let mut v4_routes = Vec::new();
         let mut v6_routes = Vec::new();
 
@@ -36,6 +40,14 @@ impl CryptoKey {
 
         for (pubkey_hex, cidrs) in &config.remote_subnets {
             let dest = parse_pubkey(pubkey_hex)?;
+            if &dest == self_key {
+                tracing::info!(
+                    "CKR: ignoring {} route(s) for own public key {}",
+                    cidrs.len(),
+                    pubkey_hex
+                );
+                continue;
+            }
             for prefix in expand_cidrs(cidrs)? {
                 match prefix {
                     IpNet::V6(_) => {
@@ -245,19 +257,32 @@ fn parse_pubkey(hex_str: &str) -> Result<[u8; 32], String> {
 /// at the TUN interface so the OS sends that traffic into the tunnel.
 /// Works on Linux, Windows, and macOS. No-op on Android (VpnService handles routes).
 #[cfg(target_os = "android")]
-pub fn install_routes(_config: &TunnelRoutingConfig, _tun_name: &str) -> Result<(), String> {
+pub fn install_routes(
+    _config: &TunnelRoutingConfig,
+    _tun_name: &str,
+    _self_key: &[u8; 32],
+) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn install_routes(config: &TunnelRoutingConfig, tun_name: &str) -> Result<(), String> {
+pub fn install_routes(
+    config: &TunnelRoutingConfig,
+    tun_name: &str,
+    self_key: &[u8; 32],
+) -> Result<(), String> {
     if !config.enable || !config.install_system_routes {
         return Ok(());
     }
 
     // Collect all unique CIDRs from the config (expanded, excludes applied).
+    // Skip entries whose destination is this node itself — those are handled
+    // by the OS's native routing and should not be steered into the TUN.
     let mut cidrs: Vec<IpNet> = Vec::new();
-    for subnet_list in config.remote_subnets.values() {
+    for (pubkey_hex, subnet_list) in &config.remote_subnets {
+        if parse_pubkey(pubkey_hex).ok().as_ref() == Some(self_key) {
+            continue;
+        }
         for prefix in expand_cidrs(subnet_list)? {
             if !cidrs.contains(&prefix) {
                 cidrs.push(prefix);
@@ -291,16 +316,19 @@ pub fn install_routes(config: &TunnelRoutingConfig, tun_name: &str) -> Result<()
 
 /// Remove previously installed CKR routes from the system routing table.
 #[cfg(target_os = "android")]
-pub fn remove_routes(_config: &TunnelRoutingConfig, _tun_name: &str) {}
+pub fn remove_routes(_config: &TunnelRoutingConfig, _tun_name: &str, _self_key: &[u8; 32]) {}
 
 #[cfg(not(target_os = "android"))]
-pub fn remove_routes(config: &TunnelRoutingConfig, tun_name: &str) {
+pub fn remove_routes(config: &TunnelRoutingConfig, tun_name: &str, self_key: &[u8; 32]) {
     if !config.enable || !config.install_system_routes {
         return;
     }
 
     let mut cidrs: Vec<IpNet> = Vec::new();
-    for subnet_list in config.remote_subnets.values() {
+    for (pubkey_hex, subnet_list) in &config.remote_subnets {
+        if parse_pubkey(pubkey_hex).ok().as_ref() == Some(self_key) {
+            continue;
+        }
         if let Ok(expanded) = expand_cidrs(subnet_list) {
             for prefix in expanded {
                 if !cidrs.contains(&prefix) {
@@ -361,10 +389,15 @@ mod tests {
         hex::encode([0x02u8; 32])
     }
 
+    /// A self-key distinct from any configured route key, so the existing
+    /// tests exercise the populated table (self-dropping is covered in its
+    /// own test below).
+    const SELF_KEY: [u8; 32] = [0xffu8; 32];
+
     #[test]
     fn test_empty_config() {
         let config = TunnelRoutingConfig::default();
-        let ckr = CryptoKey::new(&config).unwrap();
+        let ckr = CryptoKey::new(&config, &SELF_KEY).unwrap();
         assert!(ckr.v4_routes.is_empty());
         assert!(ckr.v6_routes.is_empty());
     }
@@ -380,7 +413,7 @@ mod tests {
             remote_subnets: subnets,
             install_system_routes: true,
         };
-        let ckr = CryptoKey::new(&config).unwrap();
+        let ckr = CryptoKey::new(&config, &SELF_KEY).unwrap();
         assert!(ckr.v4_routes.is_empty());
     }
 
@@ -388,7 +421,7 @@ mod tests {
     fn test_ipv4_route_lookup() {
         let mut subnets = HashMap::new();
         subnets.insert(dummy_key_hex(), vec!["10.0.0.0/24".to_string()]);
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
 
         let addr: IpAddr = "10.0.0.5".parse().unwrap();
         let key = ckr.get_public_key_for_address(addr);
@@ -405,7 +438,7 @@ mod tests {
             dummy_key_hex(),
             vec!["2001:db8::/32".to_string()],
         );
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
 
         let addr: IpAddr = "2001:db8::1".parse().unwrap();
         assert_eq!(ckr.get_public_key_for_address(addr), Some([0x01u8; 32]));
@@ -419,7 +452,7 @@ mod tests {
         let mut subnets = HashMap::new();
         subnets.insert(dummy_key_hex(), vec!["10.0.0.0/24".to_string()]);
         subnets.insert(other_key_hex(), vec!["10.0.0.0/25".to_string()]);
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
 
         // 10.0.0.5 matches both /24 and /25, but /25 is more specific
         let addr: IpAddr = "10.0.0.5".parse().unwrap();
@@ -435,7 +468,7 @@ mod tests {
         let mut subnets = HashMap::new();
         // 0200::/7 is Yggdrasil address space
         subnets.insert(dummy_key_hex(), vec!["200::/7".to_string()]);
-        let result = CryptoKey::new(&make_config(subnets));
+        let result = CryptoKey::new(&make_config(subnets), &SELF_KEY);
         assert!(result.is_err());
     }
 
@@ -446,7 +479,7 @@ mod tests {
             dummy_key_hex(),
             vec!["2001:db8::/32".to_string()],
         );
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
 
         // A Yggdrasil address should return None even if it somehow matched
         let ygg_addr: IpAddr = "200::1".parse().unwrap();
@@ -460,7 +493,7 @@ mod tests {
             dummy_key_hex(),
             vec!["10.0.0.0/24".to_string(), "10.0.0.0/24".to_string()],
         );
-        let result = CryptoKey::new(&make_config(subnets));
+        let result = CryptoKey::new(&make_config(subnets), &SELF_KEY);
         assert!(result.is_err());
     }
 
@@ -468,7 +501,7 @@ mod tests {
     fn test_invalid_cidr_rejected() {
         let mut subnets = HashMap::new();
         subnets.insert(dummy_key_hex(), vec!["not-a-cidr".to_string()]);
-        let result = CryptoKey::new(&make_config(subnets));
+        let result = CryptoKey::new(&make_config(subnets), &SELF_KEY);
         assert!(result.is_err());
     }
 
@@ -476,7 +509,7 @@ mod tests {
     fn test_invalid_pubkey_rejected() {
         let mut subnets = HashMap::new();
         subnets.insert("not-hex".to_string(), vec!["10.0.0.0/24".to_string()]);
-        let result = CryptoKey::new(&make_config(subnets));
+        let result = CryptoKey::new(&make_config(subnets), &SELF_KEY);
         assert!(result.is_err());
     }
 
@@ -487,7 +520,7 @@ mod tests {
             hex::encode([0x01u8; 16]), // 16 bytes, not 32
             vec!["10.0.0.0/24".to_string()],
         );
-        let result = CryptoKey::new(&make_config(subnets));
+        let result = CryptoKey::new(&make_config(subnets), &SELF_KEY);
         assert!(result.is_err());
     }
 
@@ -514,7 +547,7 @@ mod tests {
                 "2001:db8::/32".to_string(),
             ],
         );
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
 
         assert_eq!(ckr.v4_routes.len(), 2);
         assert_eq!(ckr.v6_routes.len(), 1);
@@ -559,7 +592,7 @@ mod tests {
             dummy_key_hex(),
             vec!["10.0.0.0/24".to_string(), "!10.0.0.5/32".to_string()],
         );
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
         // 10.0.0.5 must NOT resolve; surrounding addrs must.
         assert_eq!(
             ckr.get_public_key_for_address("10.0.0.5".parse().unwrap()),
@@ -620,12 +653,34 @@ mod tests {
     }
 
     #[test]
+    fn test_self_routes_are_dropped() {
+        // A shared config lists routes for both this node (dummy_key) and a
+        // peer (other_key). When this node is `dummy_key`, its own entry
+        // must be silently dropped; the peer's entry stays.
+        let mut subnets = HashMap::new();
+        subnets.insert(dummy_key_hex(), vec!["10.0.0.0/24".to_string()]);
+        subnets.insert(other_key_hex(), vec!["10.1.0.0/24".to_string()]);
+        let self_key = [0x01u8; 32]; // matches dummy_key_hex
+        let ckr = CryptoKey::new(&make_config(subnets), &self_key).unwrap();
+
+        assert_eq!(ckr.v4_routes.len(), 1);
+        assert_eq!(
+            ckr.get_public_key_for_address("10.0.0.5".parse().unwrap()),
+            None
+        );
+        assert_eq!(
+            ckr.get_public_key_for_address("10.1.0.5".parse().unwrap()),
+            Some([0x02u8; 32])
+        );
+    }
+
+    #[test]
     fn test_route_sorting_order() {
         let mut subnets = HashMap::new();
         // Insert in non-sorted order
         subnets.insert(dummy_key_hex(), vec!["10.0.0.0/8".to_string()]);
         subnets.insert(other_key_hex(), vec!["10.0.0.0/16".to_string()]);
-        let ckr = CryptoKey::new(&make_config(subnets)).unwrap();
+        let ckr = CryptoKey::new(&make_config(subnets), &SELF_KEY).unwrap();
 
         // /16 should come before /8 (more specific first)
         assert_eq!(ckr.v4_routes[0].prefix.prefix_len(), 16);

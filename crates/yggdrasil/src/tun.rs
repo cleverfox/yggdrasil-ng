@@ -34,6 +34,7 @@ impl TunAdapter {
         _subnet: &str,
         mtu: u16,
         #[cfg(feature = "ckr")] ckr_config: Option<&crate::config::TunnelRoutingConfig>,
+        #[cfg(feature = "ckr")] self_key: &[u8; 32],
     ) -> Result<Self, String> {
         if name == "none" {
             return Err("TUN disabled".to_string());
@@ -90,7 +91,7 @@ impl TunAdapter {
         #[cfg(feature = "ckr")]
         if let Some(ckr_cfg) = ckr_config {
             if ckr_cfg.install_system_routes {
-                if let Err(e) = crate::ckr::install_routes(ckr_cfg, tun_name) {
+                if let Err(e) = crate::ckr::install_routes(ckr_cfg, tun_name, self_key) {
                     tracing::error!("Failed to install CKR routes: {}", e);
                 }
             }
