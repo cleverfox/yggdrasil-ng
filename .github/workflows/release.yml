@@ -32,10 +32,10 @@ jobs:
         run: cargo install cross cargo-deb
 
       - name: Build with cross
-        run: cross build --release --target ${{ matrix.target }} -p yggdrasil
+        run: cross build --release --target ${{ matrix.target }} -p yggdrasil --features ckr
 
       - name: Package .deb
-        run: cargo deb -p yggdrasil --target ${{ matrix.target }} --no-build
+        run: cargo deb -p yggdrasil --target ${{ matrix.target }} --no-build --features ckr
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
@@ -74,7 +74,7 @@ jobs:
         run: cargo install cross
 
       - name: Build with cross
-        run: cross +nightly build --release --target ${{ matrix.target }} -p yggdrasil
+        run: cross +nightly build --release --target ${{ matrix.target }} -p yggdrasil --features ckr
 
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/yggdrasil yggdrasil-${{ matrix.arch }}
@@ -111,7 +111,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p yggdrasil
+        run: cargo build --release --target ${{ matrix.target }} -p yggdrasil --features ckr
 
       - name: Download wintun
         shell: pwsh
