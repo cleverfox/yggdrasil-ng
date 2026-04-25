@@ -137,6 +137,9 @@ jobs:
       - name: Install WiX toolset
         run: dotnet tool install --global wix
 
+      - name: Accept WiX OSMF EULA
+        run: wix.exe eula accept wix7
+
       - name: Get version from Cargo.toml
         id: version
         shell: pwsh
