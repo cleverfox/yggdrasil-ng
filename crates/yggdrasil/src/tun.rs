@@ -14,9 +14,10 @@ use crate::ipv6rwc::ReadWriteCloser;
 
 /// TUN adapter: bridges a TUN network device with the IPv6 RWC.
 pub struct TunAdapter {
-    _read_handle: tokio::task::JoinHandle<()>,
-    _queue_handle: tokio::task::JoinHandle<()>,
-    _write_handle: tokio::task::JoinHandle<()>,
+    device: Arc<AsyncDevice>,
+    read_handle: tokio::task::JoinHandle<()>,
+    queue_handle: tokio::task::JoinHandle<()>,
+    write_handle: tokio::task::JoinHandle<()>,
 }
 
 impl TunAdapter {
@@ -120,10 +121,33 @@ impl TunAdapter {
         });
 
         Ok(Self {
-            _read_handle: read_handle,
-            _queue_handle: queue_handle,
-            _write_handle: write_handle,
+            device,
+            read_handle,
+            queue_handle,
+            write_handle,
         })
+    }
+
+    /// Tear down the TUN adapter explicitly: abort the I/O tasks, wait for
+    /// them to drop their `Arc<AsyncDevice>` references, then drop the device
+    /// so the OS-level interface is removed before this function returns.
+    ///
+    /// On Windows this is critical when running as a service: the SCM may
+    /// terminate the process shortly after we report `ServiceState::Stopped`,
+    /// before tokio's runtime drop has a chance to abort the I/O tasks. If
+    /// the Wintun adapter isn't closed by then, it gets orphaned in the
+    /// device tree and the next startup can't recreate it.
+    pub async fn close(self) {
+        let TunAdapter { device, read_handle, queue_handle, write_handle } = self;
+        read_handle.abort();
+        queue_handle.abort();
+        write_handle.abort();
+        let _ = read_handle.await;
+        let _ = queue_handle.await;
+        let _ = write_handle.await;
+        // Tasks have released their Arc clones; drop the last one so
+        // AsyncDevice::Drop runs WintunCloseAdapter (or platform equivalent).
+        drop(device);
     }
 }
 

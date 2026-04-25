@@ -262,7 +262,7 @@ async fn run_node(
 
     // Create TUN adapter
     #[cfg(feature = "tun")]
-    let _tun = if config.if_name != "none" {
+    let mut tun = if config.if_name != "none" {
         let addr_str = core.address().to_string();
         let subnet_str = core.subnet().to_string();
         let tun_mtu = config.if_mtu.min(mtu).min(65535) as u16;
@@ -329,6 +329,18 @@ async fn run_node(
         admin.close();
     }
     core.close().await.ok();
+
+    // Tear down TUN explicitly so the OS interface is removed before this
+    // function returns. Dropping TunAdapter alone is not enough: its tokio
+    // tasks each hold an Arc<AsyncDevice>, and dropping a JoinHandle does
+    // not abort the task — it only detaches it. Without an explicit close
+    // we'd rely on the runtime drop to abort the tasks, which is too late
+    // in Windows service mode (the SCM may kill the process after we report
+    // Stopped, leaving an orphaned Wintun adapter).
+    #[cfg(feature = "tun")]
+    if let Some(t) = tun.take() {
+        t.close().await;
+    }
 
     tracing::info!("Goodbye!");
     Ok(())
