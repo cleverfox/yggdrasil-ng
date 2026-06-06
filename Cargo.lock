@@ -1730,6 +1730,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sd-notify"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b943eadf71d8b69e661330cb0e2656e31040acf21ee7708e2c238a0ec6af2bf4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2982,6 +2991,7 @@ dependencies = [
  "route_manager",
  "rustc-hash",
  "rustls",
+ "sd-notify",
  "serde",
  "serde_json",
  "socket2",

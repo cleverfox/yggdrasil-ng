@@ -42,10 +42,11 @@ rustc-hash = "2.1.2"
 arc-swap = "1.9"
 
 [features]
-default = ["ctl", "tun"]
+default = ["ctl", "tun", "systemd"]
 ctl = []
 tun = ["dep:tun-rs"]
 ckr = ["dep:route_manager"]
+systemd = ["dep:sd-notify"]
 
 [dependencies.ipnet]
 version = "2"
@@ -62,6 +63,13 @@ optional = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8.0"
+
+# systemd readiness notification (Type=notify). Linux-only; pulled in by the
+# default `systemd` feature. Drop it for OpenWRT/minimal builds via
+# `--no-default-features`.
+[target.'cfg(target_os = "linux")'.dependencies.sd-notify]
+version = "0.4"
+optional = true
 
 [package.metadata.deb]
 name = "yggdrasil-ng"

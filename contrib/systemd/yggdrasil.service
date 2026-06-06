@@ -4,6 +4,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+Type=notify
 Group=yggdrasil
 ProtectHome=true
 ProtectSystem=true

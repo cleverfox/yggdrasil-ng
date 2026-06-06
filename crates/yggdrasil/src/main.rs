@@ -337,8 +337,13 @@ async fn run_node(
                 Some(tun)
             }
             Err(e) => {
-                tracing::warn!("Failed to create TUN adapter: {}", e);
-                None
+                // A TUN was requested (if_name != "none") but could not be
+                // created. Fail loudly rather than continuing in a degraded,
+                // TUN-less state: under systemd Type=notify this surfaces as a
+                // failed start (then Restart=always retries) instead of a
+                // silently broken node that still reports "ready".
+                tracing::error!("Failed to create TUN adapter: {}", e);
+                return Err(e.into());
             }
         }
     } else {
@@ -362,6 +367,18 @@ async fn run_node(
 
     // Wait for shutdown signal
     tracing::info!("Yggdrasil NG started");
+
+    // Tell systemd we're ready (Type=notify). By this point the TUN interface
+    // (if any) has been created and the admin socket/multicast started, so
+    // ExecStartPost hooks that touch the interface can rely on it existing.
+    // This is a no-op when not running under systemd (NOTIFY_SOCKET unset).
+    #[cfg(all(feature = "systemd", target_os = "linux"))]
+    {
+        if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+            tracing::warn!("Failed to notify systemd of readiness: {}", e);
+        }
+    }
+
     shutdown_rx.changed().await.ok();
     tracing::info!("Shutting down...");
 

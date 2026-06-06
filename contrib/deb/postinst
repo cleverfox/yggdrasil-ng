@@ -39,4 +39,11 @@ fi
 # Reload systemd
 systemctl daemon-reload || true
 
+# On upgrade, restart the service so unit/binary changes (e.g. Type=notify)
+# take effect immediately. Restart only if it is already running, so a fresh
+# install is not auto-started (the user is told to enable it manually above).
+if systemctl is-active --quiet yggdrasil 2>/dev/null; then
+    systemctl try-restart yggdrasil || true
+fi
+
 #DEBHELPER#
