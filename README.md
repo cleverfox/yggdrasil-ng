@@ -482,6 +482,111 @@ The nodes don't need to be directly peered; traffic routes through the Yggdrasil
 Note that each node needs routes to every other node, so the config grows with the number of participants.
 For large deployments, consider a script to generate configs.
 
+### Routable IPv6 for Home Devices (Hurricane Electric Alternative)
+
+If your VPS comes with a routed IPv6 prefix (most providers hand out at least a /64; some give a /112 or smaller), you can use CKR to give your home machines, phones, or laptops **real, globally-routable IPv6 addresses** from that prefix — delivered through the Yggdrasil mesh. This replaces third-party tunnel brokers such as Hurricane Electric (tunnelbroker.net): your devices get full inbound and outbound IPv6 connectivity with addresses that belong to your own VPS, and they reach the VPS over whatever underlay they already have (home IPv4, CGNAT, mobile data — anything that can carry the Yggdrasil peering).
+
+Unlike the [exit-node setup](#exit-node-setup) above, **no NAT is involved** — each device sends and receives traffic with its own public address.
+
+#### Scenario
+
+The provider routes the prefix `2001:db8:0:1::/112` to the VPS:
+
+| Address | Where |
+|---------|-------|
+| `2001:db8:0:1::1` | VPS itself (on `eth0`) |
+| `2001:db8:0:1::4` | Phone (via Yggdrasil) |
+| `2001:db8:0:1::5` | Home PC (via Yggdrasil) |
+
+The VPS and each device must be built with `--features ckr`, peered with each other (peer the devices **to the VPS over IPv4** — see the note below), and you need each node's public key (`yggdrasil getSelf`).
+
+#### VPS configuration
+
+```toml
+[tunnel_routing]
+enable = true
+yggdrasil_routing = true
+
+[tunnel_routing.remote_subnets]
+"<HOME_PC_KEY>" = ["2001:db8:0:1::5/128"]
+"<PHONE_KEY>"   = ["2001:db8:0:1::4/128"]
+```
+
+The VPS does not assign these addresses to its own interfaces. With `install_system_routes = true` (the default) the daemon adds the `…::5/128` and `…::4/128` routes via the TUN automatically.
+
+Enable IPv6 forwarding on the VPS:
+
+```bash
+echo 'net.ipv6.conf.all.forwarding = 1' > /etc/sysctl.d/99-ygg.conf
+sysctl --system
+```
+
+#### Delivering the prefix to the VPS: routed vs. on-link
+
+How the provider hands you the prefix decides whether an extra step is needed:
+
+- **Routed** — the provider has a static route for your prefix pointing at the VPS. Nothing more to do; forwarding plus the config above is enough.
+- **On-link** — the provider treats the prefix as on-link on the VPS's segment and uses Neighbor Discovery to reach each address. Because `…::4`/`…::5` live on the TUN (not on `eth0`), the VPS must answer NDP for them, or return traffic is dropped at the provider's gateway.
+
+To tell them apart, run `ip -6 route` on the VPS: if the prefix shows as `dev eth0 proto kernel` (on-link) you likely need the NDP step; if it is reached via a gateway you are routed. The simplest test is to ping one of the device addresses from an outside host once everything is up — if outbound traffic from the device works but replies never arrive, it is the on-link case.
+
+For the on-link case, answer NDP with **ndppd** (`apt install ndppd`), one rule per device in `/etc/ndppd.conf`:
+
+```
+proxy eth0 {
+    rule 2001:db8:0:1::5/128 { static }
+    rule 2001:db8:0:1::4/128 { static }
+}
+```
+
+```bash
+systemctl enable --now ndppd
+```
+
+> List each device explicitly rather than the whole prefix (`2001:db8:0:1::/112 { static }`). A blanket rule also answers for unused addresses, which — since the prefix is on-link on `eth0` too — can make packets to those addresses loop on the segment until their hop limit expires.
+>
+> If you would rather not install ndppd, the kernel can proxy a fixed set of addresses instead: set `net.ipv6.conf.eth0.proxy_ndp = 1` and add `ip -6 neigh add proxy 2001:db8:0:1::5 dev eth0` for each device (these `neigh` entries are not persistent across reboots).
+
+#### Device configuration
+
+Each device assigns its own address to the TUN and routes all global IPv6 through the VPS:
+
+```toml
+# Peer to the VPS over IPv4 to avoid sending the peering through the tunnel
+peers = ["tls://<VPS_IPV4>:<PORT>"]
+
+[tunnel_routing]
+enable = true
+yggdrasil_routing = true
+ip_addresses = ["2001:db8:0:1::5/128"]   # this device's public address
+
+[tunnel_routing.remote_subnets]
+"<VPS_KEY>" = ["inetv6"]                  # all global IPv6 (2000::/3) via the VPS
+```
+
+`inetv6` expands to `2000::/3` and is installed as the device's IPv6 default route via the TUN. The same route also tells CKR to accept inbound traffic from any internet address, as long as it arrives from the VPS.
+
+> **Peer over IPv4 (or another non-tunneled path).** Because `inetv6` covers `2000::/3`, it includes the VPS's own underlay IPv6 address — peering over that address would route the peering connection back into the tunnel. Peering over IPv4 avoids this. If you must peer over IPv6, carve the VPS address out of the route with an exclusion (add `"!<VPS_UNDERLAY_IP>/128"` to the list) and make sure a native route to it exists.
+
+For name resolution, point the device at an IPv6 DNS resolver (for example `2606:4700:4700::1111`), which is reachable through the tunnel.
+
+#### Testing
+
+From the device:
+
+```bash
+curl -6 ifconfig.me        # shows this device's own address (…::5), not the VPS's
+ping6 ipv6.google.com
+```
+
+From any outside host, confirm the address is reachable inbound:
+
+```bash
+ping6 2001:db8:0:1::5
+```
+
+If large transfers stall while small pings work, suspect MTU — the tunnel adds overhead, and PMTUD (ICMPv6 Packet Too Big) must be allowed to pass.
+
 ## Running as a Windows Service
 
 On Windows, Yggdrasil-ng can run as a system service managed by the Service Control Manager (SCM).

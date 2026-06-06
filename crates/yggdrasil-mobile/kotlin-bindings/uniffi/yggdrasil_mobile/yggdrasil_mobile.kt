@@ -2190,6 +2190,13 @@ data class TunnelRoutingConfig (
     var `ipv4Address`: kotlin.String
     , 
     /**
+     * List of IP addresses (IPv4 or IPv6, in CIDR notation) to assign to the TUN interface.
+     * New preferred field supporting multiple addresses. If the list contains at least one valid (non-empty) address,
+     * the deprecated ipv4_address will not be used (retained only for compatibility with older configuration files).
+     */
+    var `ipAddresses`: List<kotlin.String>
+    , 
+    /**
      * Remote subnets to route through Yggdrasil peers.
      */
     var `remoteSubnets`: List<CkrRemoteSubnet>
@@ -2211,6 +2218,7 @@ public object FfiConverterTypeTunnelRoutingConfig: FfiConverterRustBuffer<Tunnel
         return TunnelRoutingConfig(
             FfiConverterBoolean.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
             FfiConverterSequenceTypeCkrRemoteSubnet.read(buf),
         )
     }
@@ -2218,12 +2226,14 @@ public object FfiConverterTypeTunnelRoutingConfig: FfiConverterRustBuffer<Tunnel
     override fun allocationSize(value: TunnelRoutingConfig) = (
             FfiConverterBoolean.allocationSize(value.`enable`) +
             FfiConverterString.allocationSize(value.`ipv4Address`) +
+            FfiConverterSequenceString.allocationSize(value.`ipAddresses`) +
             FfiConverterSequenceTypeCkrRemoteSubnet.allocationSize(value.`remoteSubnets`)
     )
 
     override fun write(value: TunnelRoutingConfig, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`enable`, buf)
             FfiConverterString.write(value.`ipv4Address`, buf)
+            FfiConverterSequenceString.write(value.`ipAddresses`, buf)
             FfiConverterSequenceTypeCkrRemoteSubnet.write(value.`remoteSubnets`, buf)
     }
 }
