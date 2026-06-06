@@ -67,6 +67,10 @@ dictionary TunnelRoutingConfig {
     /// Optional IPv4 address in CIDR notation to assign to the tunnel.
     /// Empty string disables IPv4 tunneling.
     string                      ipv4_address;
+    /// List of IP addresses (IPv4 or IPv6, in CIDR notation) to assign to the TUN interface.
+    /// New preferred field supporting multiple addresses. If the list contains at least one valid (non-empty) address,
+    /// the deprecated ipv4_address will not be used (retained only for compatibility with older configuration files).
+    sequence<string>            ip_addresses;
     /// Remote subnets to route through Yggdrasil peers.
     sequence<CkrRemoteSubnet>   remote_subnets;
 };

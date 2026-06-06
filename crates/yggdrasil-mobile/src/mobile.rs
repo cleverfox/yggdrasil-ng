@@ -91,6 +91,7 @@ pub struct CkrRemoteSubnet {
 pub struct TunnelRoutingConfig {
     pub enable: bool,
     pub ipv4_address: String,
+    pub ip_addresses: Vec<String>,
     pub remote_subnets: Vec<CkrRemoteSubnet>,
 }
 
@@ -160,6 +161,7 @@ fn convert_config(cfg: &YggdrasilConfig) -> config::Config {
             // ckrYggdrasilRouting is always on for the Android app.
             yggdrasil_routing: true,
             ipv4_address: cfg.tunnel_routing.ipv4_address.clone(),
+            ip_addresses: cfg.tunnel_routing.ip_addresses.clone(),
             remote_subnets,
             // Android's VpnService owns system routing; never let the core
             // try to install OS routes from the unprivileged app process.
@@ -200,6 +202,7 @@ fn config_to_udl(cfg: &config::Config) -> YggdrasilConfig {
         tunnel_routing: TunnelRoutingConfig {
             enable: false,
             ipv4_address: String::new(),
+            ip_addresses: Vec::new(),
             remote_subnets: Vec::new(),
         },
         group_password: cfg.group_password.clone(),

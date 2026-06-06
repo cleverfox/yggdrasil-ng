@@ -65,10 +65,45 @@ impl TunAdapter {
         // Assign IPv4 address to TUN if configured in CKR
         #[cfg(feature = "ckr")]
         if let Some(ckr_cfg) = ckr_config {
-            if ckr_cfg.enable && !ckr_cfg.ipv4_address.is_empty() {
+            if ckr_cfg.enable && !ckr_cfg.ipv4_address.is_empty() && ckr_cfg.ip_addresses.iter().all(|s| s.is_empty()) {
                 let (v4_addr, v4_prefix) = parse_ipv4_cidr(&ckr_cfg.ipv4_address)?;
                 builder = builder.ipv4(v4_addr, v4_prefix, None);
                 tracing::info!("CKR: assigning IPv4 address {} to TUN", ckr_cfg.ipv4_address);
+            }
+        }
+
+        #[cfg(feature = "ckr")]
+        let mut ipv4_addrs: Vec<(Ipv4Addr, u8)> = Vec::new();
+
+        // Assign IP addresses to TUN if configured in CKR
+        #[cfg(feature = "ckr")]
+        if let Some(ckr_cfg) = ckr_config {
+            for cidr in &ckr_cfg.ip_addresses {
+                if ckr_cfg.enable && !cidr.is_empty() {
+                    if cidr.contains(':') {
+                        // IPv6 path - reuse the same split/parse pattern already present 
+                        // in parse_ipv4_cidr and the existing Yggdrasil IPv6 handling above
+                        let parts: Vec<&str> = cidr.split('/').collect();
+                        if parts.len() == 1 || parts.len() == 2 {
+                            let ip_str = parts[0];
+                            let prefix: u8 = if parts.len() == 1 {
+                                128
+                            } else {
+                                parts[1].parse().map_err(|e| format!("invalid IPv6 prefix in ip_addresses '{}': {}", cidr, e))?
+                            };
+                            let ip: Ipv6Addr = ip_str.parse().map_err(|e| format!("invalid IPv6 in ip_addresses '{}': {}", cidr, e))?;
+                            builder = builder.ipv6(ip, prefix);
+                            tracing::info!("CKR: assigning IPv6 address {} to TUN", cidr);
+                        } else {
+                            return Err(format!("invalid IPv6 CIDR in ip_addresses '{}': expected addr or addr/prefix", cidr));
+                        }
+                    } else {
+                        // IPv4 path - reuse the exact existing parse_ipv4_cidr function
+                        let (v4_addr, v4_prefix) = parse_ipv4_cidr(cidr)?;
+                        ipv4_addrs.push((v4_addr, v4_prefix));
+                        tracing::info!("CKR: assigning IPv4 address {} to TUN", cidr);
+                    }
+                }
             }
         }
 
@@ -83,6 +118,13 @@ impl TunAdapter {
             .map_err(|e| format!("failed to create TUN device: {}", e))?;
 
         let device = Arc::new(device);
+
+        #[cfg(feature = "ckr")]
+        for (v4_addr, v4_prefix) in ipv4_addrs {
+            device
+                .add_address_v4(v4_addr, v4_prefix)
+                .map_err(|e| format!("failed to add IPv4 address to TUN: {}", e))?;
+        }
 
         tracing::info!("TUN device '{}' created with address {} and MTU {}", tun_name, addr, mtu);
 
@@ -181,15 +223,19 @@ async fn tun_write_loop(device: Arc<AsyncDevice>, rwc: Arc<ReadWriteCloser>) {
 #[cfg(feature = "ckr")]
 fn parse_ipv4_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
     let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return Err(format!("invalid IPv4 CIDR '{}': expected addr/prefix", cidr));
-    }
-    let addr: Ipv4Addr = parts[0]
+    let (addr_str, prefix_str) = if parts.len() == 1 {
+        (parts[0], "32")
+    } else if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        return Err(format!("invalid IPv4 CIDR '{}': expected addr or addr/prefix", cidr));
+    };
+    let addr: Ipv4Addr = addr_str
         .parse()
-        .map_err(|e| format!("invalid IPv4 address '{}': {}", parts[0], e))?;
-    let prefix: u8 = parts[1]
+        .map_err(|e| format!("invalid IPv4 address '{}': {}", addr_str, e))?;
+    let prefix: u8 = prefix_str
         .parse()
-        .map_err(|e| format!("invalid prefix length '{}': {}", parts[1], e))?;
+        .map_err(|e| format!("invalid prefix length '{}': {}", prefix_str, e))?;
     if prefix > 32 {
         return Err(format!("prefix length {} exceeds 32", prefix));
     }
