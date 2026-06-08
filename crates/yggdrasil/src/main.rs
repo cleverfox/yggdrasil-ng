@@ -327,6 +327,8 @@ async fn run_node(
             &addr_str,
             &subnet_str,
             tun_mtu,
+            #[cfg(windows)]
+            &config.if_dns_servers,
             #[cfg(feature = "ckr")]
             Some(&config.tunnel_routing),
             #[cfg(feature = "ckr")]

@@ -141,6 +141,8 @@ fn convert_config(cfg: &YggdrasilConfig) -> config::Config {
         admin_listen: "none".to_string(),
         if_name: "none".to_string(),
         if_mtu: cfg.if_mtu,
+        // Windows-only TUN DNS setting; meaningless on Android (VpnService owns DNS).
+        if_dns_servers: Vec::new(),
         node_info: toml::Value::Table(node_info),
         node_info_privacy: false,
         allowed_public_keys: Vec::new(),

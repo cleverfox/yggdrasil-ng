@@ -11,6 +11,11 @@ use tun_rs::AsyncDevice;
 
 use crate::ipv6rwc::ReadWriteCloser;
 
+/// Fixed GUID we register the wintun adapter with. Reused to target the same
+/// interface when assigning DNS servers via `SetInterfaceDnsSettings`.
+#[cfg(windows)]
+const TUN_DEVICE_GUID: u128 = 0x8f59971a78724aa6b2eb061fc4e9d0a7;
+
 /// TUN adapter: bridges a TUN network device with the IPv6 RWC.
 pub struct TunAdapter {
     device: Arc<AsyncDevice>,
@@ -25,6 +30,7 @@ impl TunAdapter {
     /// `addr`: the Yggdrasil IPv6 address string
     /// `subnet`: the /64 subnet string (for routing)
     /// `mtu`: the MTU for the TUN interface
+    /// `dns_servers`: DNS server IPs to assign to the interface (Windows only)
     /// `ckr_config`: optional CKR tunnel routing config (for route installation)
     pub async fn new(
         name: &str,
@@ -32,6 +38,7 @@ impl TunAdapter {
         addr: &str,
         _subnet: &str,
         mtu: u16,
+        #[cfg(windows)] dns_servers: &[String],
         #[cfg(feature = "ckr")] ckr_config: Option<&crate::config::TunnelRoutingConfig>,
         #[cfg(feature = "ckr")] self_key: &[u8; 32],
     ) -> Result<Self, String> {
@@ -110,7 +117,7 @@ impl TunAdapter {
         #[cfg(windows)]
         {
             // Only call device_guid on Windows
-            builder = builder.device_guid(0x8f59971a78724aa6b2eb061fc4e9d0a7);
+            builder = builder.device_guid(TUN_DEVICE_GUID);
         }
 
         let device = builder
@@ -135,6 +142,15 @@ impl TunAdapter {
                 if let Err(e) = crate::ckr::install_routes(ckr_cfg, tun_name, self_key) {
                     tracing::error!("Failed to install CKR routes: {}", e);
                 }
+            }
+        }
+
+        // Assign DNS servers to the interface (Windows only). Non-fatal on error.
+        #[cfg(windows)]
+        if !dns_servers.is_empty() {
+            match set_interface_dns(dns_servers) {
+                Ok(()) => tracing::info!("Set DNS servers on TUN interface: {}", dns_servers.join(", ")),
+                Err(e) => tracing::error!("Failed to set DNS servers on TUN interface: {}", e),
             }
         }
 
@@ -240,4 +256,102 @@ fn parse_ipv4_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), String> {
         return Err(format!("prefix length {} exceeds 32", prefix));
     }
     Ok((addr, prefix))
+}
+
+/// Assign DNS servers to our TUN interface via `SetInterfaceDnsSettings`, and
+/// disable dynamic DNS registration for it. Targets the adapter by the fixed
+/// GUID we registered it with.
+#[cfg(windows)]
+fn set_interface_dns(servers: &[String]) -> Result<(), String> {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    // Same GUID we registered the wintun adapter with. tun-rs converts the u128
+    // via GUID::from_u128, so this matches the interface GUID exactly.
+    let guid = windows::core::GUID::from_u128(TUN_DEVICE_GUID);
+
+    // SetInterfaceDnsSettings configures one address family per call, and IPv6
+    // nameservers require the DNS_SETTING_IPV6 flag — without it the addresses are
+    // parsed as IPv4 and the call fails with ERROR_INVALID_PARAMETER. Split by family.
+    let mut v4: Vec<&str> = Vec::new();
+    let mut v6: Vec<&str> = Vec::new();
+    for s in servers {
+        match IpAddr::from_str(s) {
+            Ok(IpAddr::V4(_)) => v4.push(s),
+            Ok(IpAddr::V6(_)) => v6.push(s),
+            Err(_) => tracing::warn!("Ignoring invalid DNS server address: {}", s),
+        }
+    }
+
+    apply_interface_dns(guid, &v4, false)?;
+    apply_interface_dns(guid, &v6, true)?;
+
+    // Disable dynamic DNS registration for the mesh interface: registering this
+    // interface's address with the mesh DNS servers is pointless and only produces
+    // repeated failing DDNS attempts.
+    set_interface_registration(guid, false)?;
+    Ok(())
+}
+
+/// Enable or disable dynamic DNS (DDNS) registration of the interface's addresses.
+#[cfg(windows)]
+fn set_interface_registration(guid: windows::core::GUID, enabled: bool) -> Result<(), String> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        SetInterfaceDnsSettings, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
+        DNS_SETTING_REGISTRATION_ENABLED,
+    };
+
+    let settings = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: DNS_SETTING_REGISTRATION_ENABLED as u64,
+        RegistrationEnabled: if enabled { 1 } else { 0 },
+        ..Default::default()
+    };
+
+    unsafe {
+        SetInterfaceDnsSettings(guid, &settings)
+            .ok()
+            .map_err(|e| format!("SetInterfaceDnsSettings (registration): {}", e))
+    }
+}
+
+/// Set the nameserver list for a single address family on the interface.
+/// `ipv6` selects the DNS_SETTING_IPV6 flag. No-op for an empty list.
+#[cfg(windows)]
+fn apply_interface_dns(guid: windows::core::GUID, addrs: &[&str], ipv6: bool) -> Result<(), String> {
+    use windows::core::PWSTR;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        SetInterfaceDnsSettings, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
+        DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER,
+    };
+
+    if addrs.is_empty() {
+        return Ok(());
+    }
+
+    // Comma-separated, null-terminated UTF-16 nameserver list.
+    // Must stay alive for the duration of the call below.
+    let mut ns: Vec<u16> = addrs
+        .join(",")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut flags = DNS_SETTING_NAMESERVER as u64;
+    if ipv6 {
+        flags |= DNS_SETTING_IPV6 as u64;
+    }
+
+    let settings = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: flags,
+        NameServer: PWSTR(ns.as_mut_ptr()),
+        ..Default::default()
+    };
+
+    unsafe {
+        SetInterfaceDnsSettings(guid, &settings)
+            .ok()
+            .map_err(|e| format!("SetInterfaceDnsSettings (ipv6={}): {}", ipv6, e))
+    }
 }

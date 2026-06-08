@@ -75,6 +75,11 @@ pub struct Config {
     #[serde(default = "default_mtu")]
     pub if_mtu: u64,
 
+    /// DNS servers to assign to the TUN interface. Windows only; ignored elsewhere.
+    /// IP address strings, e.g. ["201:abcd::1", "201:abcd::2"]. Empty = leave unchanged.
+    #[serde(default)]
+    pub if_dns_servers: Vec<String>,
+
     /// Custom node info (arbitrary TOML value).
     #[serde(default = "default_node_info")]
     pub node_info: toml::Value,
@@ -181,7 +186,7 @@ pub struct TunnelRoutingConfig {
     /// without prefix are supported and treated as /32 for IPv4 or /128 for IPv6; 
     /// this also applies to addresses beginning with "~" and "!").
     /// Example: { "aabbcc...01": ["10.0.0.0/24", "192.168.1.0/24"] }
-    /// Supported syntax in the lists (when built with --features ckr):
+    /// Supported syntax in the lists:
     /// - "CIDR" (or bare IP) → CKR + system route
     /// - "~CIDR" (or ~bare IP) → CKR tunnel only (no system route)
     /// - "!CIDR" (or !bare IP) → exclude from CKR (applies to both normal and ‘~’ entries)
@@ -234,6 +239,7 @@ impl Default for Config {
             admin_listen: "tcp://localhost:9001".to_string(),
             if_name: default_if_name(),
             if_mtu: default_mtu(),
+            if_dns_servers: Vec::new(),
             node_info: toml::Value::Table(toml::map::Map::new()),
             node_info_privacy: false,
             allowed_public_keys: Vec::new(),

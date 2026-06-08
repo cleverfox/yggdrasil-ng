@@ -3006,6 +3006,7 @@ dependencies = [
  "tracing-subscriber",
  "tun-rs",
  "url",
+ "windows",
  "windows-service",
  "x509-parser",
 ]

@@ -53,6 +53,10 @@ if_name = "auto"
 # Maximum Transmission Unit (MTU) for the TUN interface.
 if_mtu = 65535
 
+# DNS servers to assign to the TUN interface (Windows only). Useful when you use
+# DNS servers inside the Yggdrasil network. Ignored on other platforms.
+# if_dns_servers = ["308:84:68:55::", "308:62:45:62::"]
+
 # Closed-network group password. When set, this node only establishes encrypted
 # sessions with peers that use the EXACT same password, turning the mesh into a
 # private closed network. Every member must share the same value;
@@ -93,8 +97,7 @@ listen = true
 # priority = 0
 # password = ""
 
-# Crypto-Key Routing (CKR) — tunnel arbitrary IPv4/IPv6 subnets through
-# the Yggdrasil mesh. Requires the "ckr" feature to be enabled at build time.
+# Crypto-Key Routing (CKR) — tunnel arbitrary IPv4/IPv6 subnets through the Yggdrasil mesh.
 # Bare IPv4/IPv6 addresses without prefix are also accepted (/32 and /128 respectively; 
 # applies to ~ and ! prefixed entries too)
 # ‘~’ prefix means CKR tunnels without system routes. "inetv4"/"~inetv4" and 
