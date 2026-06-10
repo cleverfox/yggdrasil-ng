@@ -12,6 +12,7 @@ pub mod links;
 pub mod multicast;
 pub mod proto;
 pub mod tls_support;
+pub(crate) mod transport;
 #[cfg(feature = "tun")]
 pub mod tun;
 pub mod version;

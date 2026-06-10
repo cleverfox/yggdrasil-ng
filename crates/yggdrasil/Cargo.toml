@@ -41,6 +41,13 @@ getifaddrs = "0.6"
 rustc-hash = "2.1.2"
 arc-swap = "1.9"
 
+# QUIC transport
+quinn = "0.11"
+
+# WebSocket (ws/wss) transport
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
 [features]
 default = ["ctl", "tun", "systemd", "ckr"]
 ctl = []
